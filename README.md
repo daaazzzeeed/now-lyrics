@@ -137,7 +137,7 @@ cd backend
 | `ACCESS_KEY` | — | ключ в адресе экрана `?key=` (обязателен вне демо) |
 | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` | — | из Spotify Dashboard |
 | `SPOTIFY_REDIRECT_URI` | `http://127.0.0.1:8888/callback` | должен совпадать с дашбордом |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | —, `gemini-2.5-flash` | ромадзи для строк без romalrc |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | —, `gemini-flash-latest` | ромадзи для строк без romalrc |
 | `LYRICS_OFFSET_MS` | 250 | сдвиг текста вперёд |
 | `IDLE_AFTER_S` | 180 | после такой паузы экран переходит в часы |
 | `DATA_DIR` | `backend/data` | токен, кэш, обложки |

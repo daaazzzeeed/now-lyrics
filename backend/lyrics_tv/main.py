@@ -44,7 +44,8 @@ async def lifespan(app: FastAPI):
     app.state.hub, app.state.spotify = hub, spotify
     poller = asyncio.create_task(hub.run())
     mode = "ДЕМО" if C.DEMO else ("Spotify подключён" if spotify.logged_in else "нужен вход в Spotify")
-    log.info("Lyrics TV на порту %s (%s)", C.PORT, mode)
+    log.info("Lyrics TV на порту %s (%s); Gemini: %s", C.PORT, mode,
+             C.GEMINI_MODEL if C.GEMINI_API_KEY else "ключ не задан — ромадзи только из NetEase")
     if not C.ACCESS_KEY and not C.DEMO:
         log.warning("ACCESS_KEY не задан — экран будет отвечать 403")
     try:
