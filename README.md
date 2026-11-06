@@ -1,2 +1,134 @@
-# now-lyrics
-Synced lyrics for whatever’s playing on Spotify, shown on Android TV — with romaji for Japanese songs, album-art colors and an idle clock.
+# now-lyrics (Lyrics TV)
+
+Синхронизированный текст песни, которая сейчас играет в Spotify, на экране Android TV — с ромадзи для японских песен, цветами по обложке и часами в простое.
+
+Музыка играет из Spotify (например, на WiiM Pro Plus). Бэкенд на ВМ сам узнаёт, что играет, находит текст (LRCLIB → NetEase), дописывает ромадзи (romalrc → Gemini), считает палитру и отдаёт всё телевизору по Server-Sent Events. Приложение на ТВ — полноэкранный WebView, управления нет.
+
+```
+backend/     FastAPI-сервер, экран (web/), демо-данные, тесты
+android/     WebView-обёртка для Android TV
+deploy/      systemd-юнит, пример .env, скрипт установки
+```
+
+## Быстрый старт: демо в браузере
+
+```bash
+cd backend
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+DEMO=1 .venv/bin/python -m lyrics_tv
+# открыть http://127.0.0.1:8787/
+```
+
+Демо крутит по кругу японский трек с ромадзи, английский, инструментал (режим постера) и 15 с простоя (часы). `DEMO_START_MS=62000` — начать с нужного места. В демо без `ACCESS_KEY` ключ не нужен.
+
+На ТВ браузер может отдавать вьюпорт 960×540 при DPR 2 — в Chrome DevTools удобно смотреть именно этот размер.
+
+## 1. Приложение Spotify
+
+1. Зайди на <https://developer.spotify.com/dashboard> → **Create app**.
+2. **Redirect URI:** `http://127.0.0.1:8888/callback` — ровно так, с `127.0.0.1`, а не `localhost`: Spotify разрешает http только для loopback-адресов.
+3. API: **Web API**.
+4. Скопируй **Client ID** и **Client Secret**.
+
+Приложение остаётся в режиме разработки: владельцу нужен Spotify Premium, пользоваться могут максимум 5 человек (добавляются в *User Management*).
+
+## 2. Ключ Gemini
+
+Ключ берётся в <https://aistudio.google.com/apikey>. Gemini вызывается только для японских строк, которым не нашлось ромадзи в NetEase, — один запрос на трек, результат кэшируется навсегда. Модель задаётся в `GEMINI_MODEL`. Если ключа нет, текст всё равно показывается, просто без ромадзи у этих строк.
+
+## 3. Установка на ВМ
+
+Нужен Linux с systemd и Python 3.11+.
+
+```bash
+git clone https://github.com/daaazzzeeed/now-lyrics.git && cd now-lyrics
+sudo ./deploy/install.sh
+sudo nano /opt/lyrics-tv/.env        # SPOTIFY_CLIENT_ID/SECRET, GEMINI_API_KEY
+sudo systemctl restart lyrics-tv
+```
+
+Скрипт копирует `backend/` в `/opt/lyrics-tv`, создаёт venv, кладёт `.env` с уже сгенерированным `ACCESS_KEY` и включает сервис `lyrics-tv`. Сервис работает от `DynamicUser`, данные (токен, кэш, обложки) лежат в `/var/lib/lyrics-tv`, лимит памяти — 200 МБ (в покое процесс занимает около 50 МБ).
+
+Открой порт в файрволе:
+
+```bash
+sudo ufw allow 8787/tcp
+```
+
+Если у провайдера ВМ есть свой файрвол (security group), открой порт и там. Адрес экрана для ТВ: `http://IP_ВМ:8787/?key=ACCESS_KEY`.
+
+Логи: `journalctl -u lyrics-tv -f`. Обновление: `git pull && sudo ./deploy/install.sh`.
+
+## 4. Вход в Spotify через SSH-туннель
+
+`/login` и `/callback` открываются только с `127.0.0.1` самой ВМ, поэтому заходить нужно через туннель с компьютера:
+
+```bash
+ssh -L 8888:127.0.0.1:8787 user@IP_ВМ
+```
+
+Не закрывая SSH, открой в браузере <http://127.0.0.1:8888/login>, войди в Spotify и разреши доступ. Появится «Готово ✓», и экран на ТВ оживёт сам. Туннель после этого можно закрыть.
+
+Вход действует около 6 месяцев, и обновление токена этот срок не продлевает. За 10 дней до конца на экране появится плашка: тогда просто повтори вход. Если Spotify отзовёт токен раньше, экран сам покажет подсказку с командой туннеля.
+
+## 5. Приложение на ТВ
+
+### Сборка APK
+
+Нужен Android Studio (или JDK 17 + Android SDK 35).
+
+1. В `android/gradle.properties` впиши адрес: `lyrics.url=http://IP_ВМ:8787/?key=ACCESS_KEY`. Можно не вписывать: тогда при первом запуске приложение само спросит адрес.
+2. Открой папку `android/` в Android Studio и дождись синхронизации Gradle. Gradle Wrapper Studio скачает сама. Без Studio сначала один раз выполни `gradle wrapper` в `android/`.
+3. **Build → Build APK(s)** или `./gradlew assembleRelease`. APK появится в `android/app/build/outputs/apk/release/app-release.apk`.
+
+Release подписан debug-ключом, для установки по adb этого достаточно.
+
+### Установка на Sony
+
+1. **Настройки → Об устройстве (Система → О системе)** → 7 раз нажми на «Сборка», чтобы включился режим разработчика.
+2. **Настройки → Для разработчиков** → включи **Отладка по USB** и **Отладка по сети** (ADB over network). ТВ покажет свой IP.
+3. На компьютере:
+   ```bash
+   adb connect IP_ТВ:5555      # на ТВ подтверди запрос
+   adb install -r app-release.apk
+   ```
+4. Приложение **Lyrics TV** появится среди приложений на главном экране.
+
+Адрес можно сменить с пульта: долгое нажатие **OK** (1.5 с) или кнопка **Меню**. Если текст отстаёт или спешит, допиши к адресу `&offset=300` (мс, можно с минусом).
+
+### Чтобы ТВ не засыпал
+
+Приложение держит экран включённым, но у Sony есть отдельный таймер:
+
+- **Настройки → Система → Питание и энергия → Режим ожидания при бездействии → Выкл** (на старых моделях: *Питание → Режим ожидания при бездействии*).
+- **Настройки → Система → Заставка → Когда включать → Никогда**.
+
+Когда ТВ уходит в фон или выключается, приложение закрывает соединение, и сервер перестаёт опрашивать Spotify. При включении всё возобновляется само.
+
+### Проверка производительности
+
+Прокрутка строк и смена трека должны идти без видимых рывков. Для замера в `gradle.properties` оставлено `lyrics.webviewDebug=true`. Подключи ТВ по adb, открой на компьютере `chrome://inspect` → **inspect** → *Rendering → Frame Rendering Stats*. Если WebView на конкретном ТВ не тянет, экран переписывается на Kotlin + Compose for TV, а SSE-протокол остаётся прежним.
+
+## Тесты
+
+```bash
+cd backend
+.venv/bin/python -m pytest -v
+```
+
+- **Юнит-тесты:** парсер LRC, фильтр титров, склейка ромадзи, выбор кандидатов LRCLIB и NetEase, `clean_title`, палитра.
+- **Сквозной тест:** настоящий сервер против поддельных Spotify, LRCLIB, NetEase и Gemini на localhost. Он проверяет фолбэк на NetEase с romalrc, дополнение строк через Gemini, кэш, переходы в `paused`/`idle`/`auth`, остановку опроса без клиентов, `/login`, 403 без ключа, отдачу обложки и RSS процесса (< 80 МБ).
+
+## Настройки (.env)
+
+| Переменная | По умолчанию | Что |
+|---|---|---|
+| `PORT` | 8787 | порт сервера |
+| `ACCESS_KEY` | — | ключ в адресе экрана `?key=` (обязателен вне демо) |
+| `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` | — | из Spotify Dashboard |
+| `SPOTIFY_REDIRECT_URI` | `http://127.0.0.1:8888/callback` | должен совпадать с дашбордом |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | —, `gemini-2.5-flash` | ромадзи для строк без romalrc |
+| `LYRICS_OFFSET_MS` | 250 | сдвиг текста вперёд |
+| `IDLE_AFTER_S` | 180 | после такой паузы экран переходит в часы |
+| `DATA_DIR` | `backend/data` | токен, кэш, обложки |
+| `DEMO`, `DEMO_START_MS` | 0, 0 | демо-режим без Spotify |
