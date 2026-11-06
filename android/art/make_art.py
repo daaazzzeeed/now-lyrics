@@ -2,7 +2,8 @@
 
 Пересобрать (нужен Pillow, например из venv бэкенда):
     backend/.venv/bin/python android/art/make_art.py android/app/src/main/res backend/web/fonts /tmp
-"""import math
+"""
+import math
 import sys
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
