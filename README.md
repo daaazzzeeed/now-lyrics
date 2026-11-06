@@ -75,7 +75,17 @@ ssh -L 8888:127.0.0.1:8787 user@IP_ВМ
 
 ### Сборка APK
 
-Нужен Android Studio (или JDK 17 + Android SDK 35).
+**Проще всего — GitHub Actions.** После пуша изменений в `android/` (или вручную: *Actions → build → Run workflow*) GitHub сам соберёт APK. Готовый файл лежит на странице запуска в разделе **Artifacts → lyrics-tv-apk** (скачается zip, APK внутри). Адрес с ключом в такой APK не зашивается — его вводят на ТВ при первом запуске.
+
+Длинный адрес неудобно набирать пультом, его можно «напечатать» с компьютера, пока на ТВ открыт диалог ввода:
+
+```bash
+adb shell input text 'http://IP_ВМ:8787/?key=ACCESS_KEY'
+```
+
+Каждая сборка в CI подписана своим временным debug-ключом, поэтому обновить приложение поверх старого не получится: сначала `adb uninstall tv.lyrics.app`, потом `adb install`. Адрес после этого придётся ввести заново.
+
+**Локально** нужен Android Studio (или JDK 17 + Android SDK 35).
 
 1. В `android/gradle.properties` впиши адрес: `lyrics.url=http://IP_ВМ:8787/?key=ACCESS_KEY`. Можно не вписывать: тогда при первом запуске приложение само спросит адрес.
 2. Открой папку `android/` в Android Studio и дождись синхронизации Gradle. Gradle Wrapper Studio скачает сама. Без Studio сначала один раз выполни `gradle wrapper` в `android/`.
