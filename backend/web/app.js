@@ -70,6 +70,29 @@
     back.src = url;
   }
 
+  // ── жирный CJK-шрифт трека: подмножество с сервера, пока грузится — системный шрифт ──
+  var BASE_FONT = getComputedStyle(body).fontFamily, fontUrl = null, fontFace = null;
+  var CJK_RANGE = 'U+3000-30FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FF00-FFEF, U+AC00-D7AF, ' +
+                  'U+1100-11FF, U+3130-318F, U+31F0-31FF';
+  function applyFont(url) {
+    if (url === fontUrl) return;
+    fontUrl = url;
+    if (!url) { body.style.fontFamily = ''; return; }
+    if (!window.FontFace || !document.fonts) return;
+    var fam = 'CJK-' + url.replace(/[^A-Za-z0-9]/g, '').slice(-16);
+    var face = new FontFace(fam, 'url(' + url + '&key=' + encodeURIComponent(KEY) + ')',
+                            { weight: '100 900', unicodeRange: CJK_RANGE, display: 'swap' });
+    face.load().then(function () {
+      if (fontUrl !== url) return;                       // трек уже сменился
+      document.fonts.add(face);
+      if (fontFace) document.fonts.delete(fontFace);
+      fontFace = face;
+      body.style.fontFamily = '"' + fam + '", ' + BASE_FONT;
+      activeIdx = -2; lastY = -1;                         // высоты строк изменились
+      fitTitle();
+    }).catch(function () { /* нет шрифта — остаётся системный */ });
+  }
+
   // ── длинное название: до двух строк, иначе бегущая строка (только transform) ──
   var titleAnim = null, fitTimer = null;
   function fitTitle() {
@@ -108,7 +131,7 @@
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i], ln = row.idx >= 0 ? L.lines[row.idx] : null;
       if (row.note || !ln) continue;
-      var want = ln.romaji || ln.sub || '';
+      var want = ln.translit || ln.romaji || ln.sub || '';
       if (want !== row.sub) { setSub(row.el, want); row.sub = want; changed = true; }
     }
     if (changed) { activeIdx = -2; lastY = -1; }   // высота строк изменилась — пересчитать прокрутку
@@ -116,7 +139,10 @@
 
   function renderLyrics() {
     var L = S.lyrics;
-    var key = (S.track ? S.track.id : '') + '|' + S.lyrics_state + '|' + (L && L.lines ? L.lines.length + ':' + L.synced : 0);
+    // ключ: трек, состояние, число строк, тайминги (поправка/масштаб); транслитерацию дописываем на месте
+    var adj = L && L.adj ? L.adj.scale + ':' + L.adj.offset_ms : '';
+    var key = (S.track ? S.track.id : '') + '|' + S.lyrics_state + '|' +
+      (L && L.lines ? L.lines.length + ':' + L.synced + ':' + (L.source_id || '') + ':' + adj : 0);
     if (key === lyricsKey) { patchRomaji(); return; }   // тот же текст — ромадзи дописываем на месте
     lyricsKey = key;
     rows = []; activeIdx = -2; lastY = -1;
@@ -136,7 +162,7 @@
     if (synced && src[0].ln.t > 2500) src.unshift({ ln: { t: 0, text: '' }, idx: -1 });   // вступление — ♪
     var frag = document.createDocumentFragment();
     src.forEach(function (item) {
-      var ln = item.ln, sub = ln.romaji || ln.sub || '';
+      var ln = item.ln, sub = ln.translit || ln.romaji || ln.sub || '';
       var d = document.createElement('div');
       if (!synced && !ln.text) { d.className = 'gap'; frag.appendChild(d); return; }
       d.className = 'line';
@@ -255,6 +281,7 @@
       setCover(tr.cover + (tr.cover.indexOf('?') < 0 ? '?' : '&') + 'key=' + encodeURIComponent(KEY));
       lastSec = -1;
     }
+    applyFont(tr && tr.font ? tr.font : null);
     var bare = !!tr && m.lyrics_state === 'none';
     if (bare !== body.classList.contains('bare')) { body.classList.toggle('bare', bare); fitTitle(); }
     renderLyrics();
