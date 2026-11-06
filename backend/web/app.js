@@ -12,7 +12,7 @@
   var el = {
     bgA: $('bgA'), bgB: $('bgB'), cover: $('cover'), coverA: $('coverA'), coverB: $('coverB'),
     title: $('title'), artist: $('artist'), fill: $('fill'), knob: $('knob'),
-    elapsed: $('elapsed'), remaining: $('remaining'), device: $('device'), deviceName: $('deviceName'),
+    elapsed: $('elapsed'), remaining: $('remaining'),
     lyrics: $('lyrics'), hint: $('hint'), viewport: $('viewport'), lines: $('lines'),
     time: $('time'), date: $('date'), clock: $('clock'),
     ntTitle: $('ntTitle'), ntBody: $('ntBody'), authchip: $('authchip')
@@ -71,12 +71,29 @@
   }
 
   // ── текст ──
+  function setSub(d, text) {
+    var r = d.querySelector('.r');
+    if (!text) { if (r) d.removeChild(r); return; }
+    if (!r) { r = document.createElement('div'); r.className = 'r'; d.appendChild(r); }
+    if (r.textContent !== text) r.textContent = text;
+  }
+
+  function patchRomaji() {
+    var L = S.lyrics, changed = false;
+    if (!L || !L.lines) return;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i], ln = row.idx >= 0 ? L.lines[row.idx] : null;
+      if (row.note || !ln) continue;
+      var want = ln.romaji || ln.sub || '';
+      if (want !== row.sub) { setSub(row.el, want); row.sub = want; changed = true; }
+    }
+    if (changed) { activeIdx = -2; lastY = -1; }   // высота строк изменилась — пересчитать прокрутку
+  }
+
   function renderLyrics() {
     var L = S.lyrics;
-    var roma = 0;
-    if (L && L.lines) L.lines.forEach(function (x) { if (x.romaji) roma++; });
-    var key = (S.track ? S.track.id : '') + '|' + S.lyrics_state + '|' + (L ? L.lines.length + ':' + roma : 0);
-    if (key === lyricsKey) return;
+    var key = (S.track ? S.track.id : '') + '|' + S.lyrics_state + '|' + (L && L.lines ? L.lines.length + ':' + L.synced : 0);
+    if (key === lyricsKey) { patchRomaji(); return; }   // тот же текст — ромадзи дописываем на месте
     lyricsKey = key;
     rows = []; activeIdx = -2; lastY = -1;
     el.lines.className = 'lines';
@@ -91,10 +108,11 @@
     if (!L || !L.lines || !L.lines.length) return;
 
     synced = !!L.synced;
-    var src = L.lines.slice();
-    if (synced && src[0].t > 2500) src.unshift({ t: 0, text: '' });   // вступление — ♪
+    var src = L.lines.map(function (ln, i) { return { ln: ln, idx: i }; });
+    if (synced && src[0].ln.t > 2500) src.unshift({ ln: { t: 0, text: '' }, idx: -1 });   // вступление — ♪
     var frag = document.createDocumentFragment();
-    src.forEach(function (ln) {
+    src.forEach(function (item) {
+      var ln = item.ln, sub = ln.romaji || ln.sub || '';
       var d = document.createElement('div');
       if (!synced && !ln.text) { d.className = 'gap'; frag.appendChild(d); return; }
       d.className = 'line';
@@ -107,16 +125,10 @@
         o.className = 'o';
         o.textContent = ln.text;
         d.appendChild(o);
-        var sub = ln.romaji || ln.sub;
-        if (sub) {
-          var r = document.createElement('div');
-          r.className = 'r';
-          r.textContent = sub;
-          d.appendChild(r);
-        }
+        setSub(d, sub);
       }
       frag.appendChild(d);
-      rows.push({ t: ln.t || 0, el: d, note: note });
+      rows.push({ t: ln.t || 0, el: d, note: note, idx: item.idx, sub: sub });
     });
     el.lines.appendChild(frag);
     if (!synced) { el.lines.classList.add('plain'); el.hint.textContent = 'без таймингов'; }
@@ -218,8 +230,6 @@
       setCover(tr.cover + (tr.cover.indexOf('?') < 0 ? '?' : '&') + 'key=' + encodeURIComponent(KEY));
       lastSec = -1;
     }
-    el.deviceName.textContent = m.device || '';
-    el.device.classList.toggle('hidden', !m.device);
     body.classList.toggle('bare', !!tr && m.lyrics_state === 'none');
     renderLyrics();
     activeIdx = -2;

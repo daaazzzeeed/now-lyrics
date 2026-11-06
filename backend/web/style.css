@@ -127,15 +127,6 @@ body {
 }
 body.paused .paused-chip { opacity: 1; }
 
-.device {
-  display: flex; align-items: center; gap: 1vh;
-  margin-top: 2.8vh;
-  font-size: 2.1vh; font-weight: 600;
-  color: #1ed760;
-}
-.device svg { width: 2.7vh; height: 2.7vh; flex: none; }
-.device.hidden { visibility: hidden; }
-
 /* ── карточка «Текст» ── */
 #lyrics {
   position: relative;
