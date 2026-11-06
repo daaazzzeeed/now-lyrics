@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -32,6 +33,8 @@ SYSTEMS = {
 FALLBACK_MODELS = ("gemini-flash-latest", "gemini-flash-lite-latest")
 TIMEOUT = httpx.Timeout(8, connect=5)
 PHASE1_LINES = 8
+CHUNK_LINES = 10   # фаза 2 кусками, чтобы каждый запрос укладывался в таймаут
+PARALLEL = 3
 
 
 class TranslitFailed(Exception):
@@ -117,22 +120,26 @@ def apply_known(lines: list[dict], lang: str, known: dict[str, str]) -> int:
 
 async def fill(client: httpx.AsyncClient, lyr: dict, lang: str, pos_ms: Callable[[], int | None],
                known: dict[str, str], on_phase: Callable[[], None] | None = None) -> bool:
-    """Транслитерация недостающих строк в две фазы. True — всё готово (можно кэшировать)."""
+    """Транслитерация недостающих строк: фаза 1 — строки у текущей позиции, фаза 2 — остальное кусками
+    по CHUNK_LINES параллельно (каждый запрос укладывается в таймаут 8 с). True — всё готово."""
     lines = lyr["lines"]
     if apply_known(lines, lang, known) and on_phase:
         on_phase()
     todo = [i for i, ln in enumerate(lines) if needs_translit(ln, lang)]
-    for part in phases(lines, todo, pos_ms(), lyr.get("synced", False)):
+    sem = asyncio.Semaphore(PARALLEL)
+
+    async def one(part: list[int]) -> bool:
         part = [i for i in part if needs_translit(lines[i], lang)]  # могло заполниться из known
         if not part:
-            continue
-        t0 = time.monotonic()
-        try:
-            out = await gemini(client, lang, [lines[i]["text"] for i in part],
-                               [lines[i].get("translit") for i in part])  # слоговый romalrc — подсказка
-        except TranslitFailed as e:
-            log.warning("Gemini (%s): %s", lang, e)
-            return False
+            return True
+        async with sem:
+            t0 = time.monotonic()
+            try:
+                out = await gemini(client, lang, [lines[i]["text"] for i in part],
+                                   [lines[i].get("translit") for i in part])  # слоговый romalrc — подсказка
+            except TranslitFailed as e:
+                log.warning("Gemini (%s): %s", lang, e)
+                return False
         for i, r in zip(part, out):
             if r:
                 lines[i]["translit"] = r
@@ -140,7 +147,16 @@ async def fill(client: httpx.AsyncClient, lyr: dict, lang: str, pos_ms: Callable
         log.info("Gemini (%s): %d строк за %d мс", lang, len(part), (time.monotonic() - t0) * 1000)
         if on_phase:
             on_phase()
-    return True
+        return True
+
+    ok = True
+    for n, part in enumerate(phases(lines, todo, pos_ms(), lyr.get("synced", False))):
+        chunks = [part[k:k + CHUNK_LINES] for k in range(0, len(part), CHUNK_LINES)] if n else [part]
+        results = await asyncio.gather(*(one(c) for c in chunks))
+        ok = ok and all(results)
+        if n == 0 and not ok:
+            return False  # даже ближайшие строки не вышли — Gemini недоступен, остальное не мучаем
+    return ok
 
 
 async def _check(lang: str, texts: list[str]) -> None:
@@ -156,7 +172,6 @@ async def _check(lang: str, texts: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    import asyncio
     import sys
 
     args = sys.argv[1:]

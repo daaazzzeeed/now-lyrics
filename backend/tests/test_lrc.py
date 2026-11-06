@@ -378,3 +378,29 @@ def test_font_worker_makes_woff2(tmp_path):
     subprocess.run([sys.executable, "-m", "lyrics_tv.font_worker", str(src), str(out), str(chars)],
                    cwd=BACKEND, check=True)
     assert out.read_bytes()[:4] == b"wOF2" and out.stat().st_size < src.stat().st_size
+
+
+def test_fill_splits_phase2_into_parallel_chunks(monkeypatch):
+    monkeypatch.setattr(C, "GEMINI_API_KEY", "k")
+    sizes, inflight, peak = [], [0], [0]
+
+    async def handler(req):
+        items = json.loads(json.loads(req.content)["contents"][0]["parts"][0]["text"])
+        sizes.append(len(items))
+        inflight[0] += 1
+        peak[0] = max(peak[0], inflight[0])
+        await asyncio.sleep(0.05)
+        inflight[0] -= 1
+        out = [f"r{x['text']}" for x in items]
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps(out)}]}}]})
+
+    lyr = {"synced": True, "lines": [{"t": i * 4000, "text": f"行{i}"} for i in range(40)]}
+    updates = []
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await translit.fill(client, lyr, "ja", lambda: 0, {}, lambda: updates.append(1))
+    assert run(go()) is True
+    assert sizes[0] == 8 and sorted(sizes[1:]) == [2, 10, 10, 10]   # 8 у позиции, затем куски по 10
+    assert 1 < peak[0] <= 3 and len(updates) == 5
+    assert all(ln["translit"] == "r" + ln["text"] for ln in lyr["lines"])
