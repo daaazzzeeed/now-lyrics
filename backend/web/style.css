@@ -1,0 +1,278 @@
+@font-face { font-family: "Inter Display"; font-weight: 500; font-display: swap; src: url(fonts/InterDisplay-Medium.woff) format("woff"); }
+@font-face { font-family: "Inter Display"; font-weight: 600; font-display: swap; src: url(fonts/InterDisplay-SemiBold.woff) format("woff"); }
+@font-face { font-family: "Inter Display"; font-weight: 700; font-display: swap; src: url(fonts/InterDisplay-Bold.woff) format("woff"); }
+@font-face { font-family: "Inter Display"; font-weight: 800; font-display: swap; src: url(fonts/InterDisplay-ExtraBold.woff) format("woff"); }
+
+:root {
+  --font: "Inter Display", "Noto Sans CJK JP", "Noto Sans JP", "Hiragino Sans", "Yu Gothic", Roboto, system-ui, sans-serif;
+  --cs: min(56vh, 34vw);           /* размер обложки */
+  --pad-y: 7vh;
+  --pad-x: 5.5vw;
+  --ink-future: rgba(0, 0, 0, .56);  /* ещё не спетые строки — тёмные, как у Spotify */
+  --ink-past: rgba(255, 255, 255, .5);
+  --ink-active: #fff;
+  --ease: cubic-bezier(.22, .8, .2, 1);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #111317; }
+body {
+  font-family: var(--font);
+  color: #fff;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  cursor: none;
+  user-select: none;
+}
+
+/* ── фон: два слоя, чтобы цвет перетекал при смене трека ── */
+.bg {
+  position: fixed; inset: 0;
+  opacity: 0;
+  transition: opacity 1.4s ease;
+  will-change: opacity;
+}
+.bg.on { opacity: 1; }
+
+/* ── основная сцена ── */
+#stage {
+  position: fixed; inset: 0;
+  display: grid;
+  grid-template-columns: var(--cs) minmax(0, 1fr);
+  column-gap: 5vw;
+  align-items: center;
+  padding: var(--pad-y) var(--pad-x);
+  transition: opacity .8s ease;
+}
+
+#now { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+
+.cover {
+  position: relative;
+  width: var(--cs); height: var(--cs);
+  border-radius: 1.3vh;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .07);
+  box-shadow: 0 3.2vh 7vh rgba(0, 0, 0, .42), 0 .5vh 1.4vh rgba(0, 0, 0, .28);
+}
+.cover img {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity .9s ease;
+}
+.cover img.on { opacity: 1; }
+.cover-note {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  font-size: calc(var(--cs) * .3);
+  color: rgba(255, 255, 255, .22);
+  opacity: 0;
+  transition: opacity .6s;
+}
+.cover.empty .cover-note { opacity: 1; }
+
+.meta { width: var(--cs); margin-top: 4.4vh; }
+.title {
+  font-size: 4.7vh; font-weight: 800;
+  letter-spacing: -.02em; line-height: 1.14;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.artist {
+  margin-top: .8vh;
+  font-size: 2.9vh; font-weight: 500;
+  color: rgba(255, 255, 255, .72);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.progress { margin-top: 3.6vh; }
+.bar {
+  position: relative;
+  height: .55vh;
+  border-radius: 1vh;
+  background: rgba(255, 255, 255, .24);
+}
+.fill {
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  background: #fff;
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+.knob {
+  position: absolute; top: 50%; left: 0;
+  width: 1.7vh; height: 1.7vh;
+  margin: -.85vh 0 0 -.85vh;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 .2vh .7vh rgba(0, 0, 0, .35);
+}
+.times {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 1.4vh;
+  font-size: 2vh; font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, .68);
+}
+.paused-chip {
+  font-size: 1.6vh; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase;
+  padding: .45vh 1.1vh;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, .14);
+  color: rgba(255, 255, 255, .85);
+  opacity: 0;
+  transition: opacity .4s;
+}
+body.paused .paused-chip { opacity: 1; }
+
+.device {
+  display: flex; align-items: center; gap: 1vh;
+  margin-top: 2.8vh;
+  font-size: 2.1vh; font-weight: 600;
+  color: #1ed760;
+}
+.device svg { width: 2.7vh; height: 2.7vh; flex: none; }
+.device.hidden { visibility: hidden; }
+
+/* ── карточка «Текст» ── */
+#lyrics {
+  position: relative;
+  height: calc(100vh - 2 * var(--pad-y));
+  display: flex; flex-direction: column;
+  border-radius: 2.6vh;
+  background: #5a6a7d;
+  overflow: hidden;
+  transition: background-color 1.4s ease, opacity .6s ease;
+  box-shadow: 0 2vh 6vh rgba(0, 0, 0, .22);
+}
+#lyrics header {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 4.2vh 4.8vh 0;
+  font-size: 2.7vh; font-weight: 800; letter-spacing: -.01em;
+}
+#lyrics .hint { font-size: 1.8vh; font-weight: 600; color: rgba(255, 255, 255, .62); }
+
+.viewport {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  margin-top: 1.2vh;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 8%, #000 80%, transparent 100%);
+          mask-image: linear-gradient(180deg, transparent 0, #000 8%, #000 80%, transparent 100%);
+}
+.lines {
+  position: relative;
+  padding: 5vh 4.8vh 60vh;
+  transform: translate3d(0, 0, 0);
+  transition: transform .75s var(--ease);
+  will-change: transform;
+}
+.line {
+  margin: 0 0 2.6vh;
+  font-size: 5.3vh; font-weight: 800;
+  line-height: 1.16; letter-spacing: -.016em;
+  color: var(--ink-future);
+  overflow-wrap: break-word;
+  transition: color .4s ease;
+}
+.line .r {
+  margin-top: .7vh;
+  font-size: 2.8vh; font-weight: 600;
+  line-height: 1.25; letter-spacing: 0;
+  opacity: .92;
+}
+.line.past { color: var(--ink-past); }
+.line.active { color: var(--ink-active); }
+.line.note { font-size: 4.4vh; }
+.line.note.active { animation: breathe 1.8s ease-in-out infinite; }
+@keyframes breathe { 50% { opacity: .45; } }
+
+.lines.plain .line { font-size: 4.3vh; color: rgba(255, 255, 255, .9); margin-bottom: 1.6vh; }
+.lines.plain .gap { height: 3vh; }
+
+.lines.loading { padding-top: 6vh; }
+.sk {
+  height: 4.6vh; width: 72%;
+  margin-bottom: 2.8vh;
+  border-radius: 1vh;
+  background: rgba(0, 0, 0, .14);
+  animation: breathe 1.6s ease-in-out infinite;
+}
+.sk.s2 { width: 54%; animation-delay: .2s; }
+.sk.s3 { width: 63%; animation-delay: .4s; }
+
+body.paused .lines { opacity: .75; transition: transform .75s var(--ease), opacity .6s; }
+
+/* ── без текста: крупная обложка и название, как постер ── */
+body.bare { --cs: min(64vh, 40vw); }
+body.bare #stage { grid-template-columns: var(--cs) minmax(0, 46vw); justify-content: center; }
+body.bare #now { display: contents; }
+body.bare .cover { grid-column: 1; }
+body.bare .meta { grid-column: 2; width: auto; margin: 0; align-self: center; }
+body.bare .title { font-size: 7.4vh; white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+body.bare .artist { font-size: 3.6vh; margin-top: 1.6vh; }
+body.bare .progress { margin-top: 6vh; max-width: 40vw; }
+body.bare #lyrics { display: none; }
+
+/* ── часы в режиме ожидания ── */
+#clock {
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 1.2s ease, transform 4s ease;
+}
+#clock .time {
+  font-size: 25vh; font-weight: 700;
+  letter-spacing: -.035em; line-height: 1;
+  color: rgba(255, 255, 255, .94);
+}
+#clock .date {
+  margin-top: 2.6vh;
+  font-size: 3.6vh; font-weight: 500;
+  color: rgba(255, 255, 255, .58);
+}
+body.idle #clock { opacity: 1; }
+body.idle #stage, body.notice-on #stage, body.boot #stage, body.connecting #stage { opacity: 0; }
+
+/* ── экран-подсказка: вход в Spotify, настройка ── */
+#notice {
+  position: fixed; inset: 0;
+  display: grid; place-items: center;
+  opacity: 0; pointer-events: none;
+  transition: opacity .6s;
+}
+body.notice-on #notice { opacity: 1; }
+body.notice-on #clock { opacity: 0; }
+#notice .box {
+  max-width: 62vw;
+  padding: 5vh 5.5vh;
+  border-radius: 2.6vh;
+  background: rgba(255, 255, 255, .08);
+}
+#notice .nt { font-size: 4.4vh; font-weight: 800; letter-spacing: -.02em; }
+#notice .nb { margin-top: 2vh; font-size: 2.5vh; font-weight: 500; line-height: 1.5; color: rgba(255, 255, 255, .75); }
+#notice code {
+  font-family: ui-monospace, "Roboto Mono", monospace;
+  font-size: .92em;
+  padding: .15em .45em;
+  border-radius: .4em;
+  background: rgba(0, 0, 0, .35);
+  color: #fff;
+}
+
+/* ── служебные плашки ── */
+.chip {
+  position: fixed; right: 3vw; bottom: 3.5vh;
+  padding: 1vh 1.8vh;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, .45);
+  font-size: 1.8vh; font-weight: 600;
+  color: rgba(255, 255, 255, .8);
+  opacity: 0;
+  transition: opacity .6s;
+}
+.chip.left { right: auto; left: 3vw; }
+body.offline #conn, #authchip.on { opacity: 1; }
