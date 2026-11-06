@@ -1,0 +1,24 @@
+[Unit]
+Description=Lyrics TV — текст песен для экрана
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=lyrics-tv
+EnvironmentFile=/opt/lyrics-tv/.env
+Environment=DATA_DIR=/var/lib/lyrics-tv
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/opt/lyrics-tv/backend
+ExecStart=/opt/lyrics-tv/venv/bin/python -m lyrics_tv
+Restart=always
+RestartSec=3
+MemoryMax=200M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
