@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Lyrics TV</string>
+    <string name="url_title">Адрес экрана</string>
+    <string name="url_hint">Например http://1.2.3.4:8787/?key=…\nМожно добавить &amp;offset=300, чтобы сдвинуть текст.</string>
+    <string name="save">Сохранить</string>
+    <string name="reset">По умолчанию</string>
+</resources>

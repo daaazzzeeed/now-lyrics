@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Нет связи</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #15171b; color: #f2f2f2; overflow: hidden;
+               font-family: Roboto, "Noto Sans", sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  h1 { font-size: 6vh; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  p { font-size: 2.8vh; opacity: .6; margin: 2.4vh 0 0; }
+  .dot { display: inline-block; width: 1.4vh; height: 1.4vh; border-radius: 50%; background: #fff;
+         margin: 4vh .6vh 0; opacity: .25; animation: b 1.4s ease-in-out infinite; }
+  .dot:nth-child(2) { animation-delay: .2s; } .dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes b { 50% { opacity: .9; } }
+</style>
+<h1>Нет связи с сервером</h1>
+<p>Повторю через несколько секунд. Адрес можно сменить: долгое нажатие OK или «Меню».</p>
+<div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+</html>
