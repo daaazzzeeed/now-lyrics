@@ -34,7 +34,7 @@ DEMO=1 .venv/bin/python -m lyrics_tv
 
 ## 2. Ключ Gemini
 
-Ключ берётся в <https://aistudio.google.com/apikey>. Gemini вызывается только для японских строк, которым не нашлось ромадзи в NetEase, — один запрос на трек, результат кэшируется навсегда. Модель задаётся в `GEMINI_MODEL`. Если ключа нет, текст всё равно показывается, просто без ромадзи у этих строк.
+Ключ берётся в <https://aistudio.google.com/apikey>. Gemini вызывается только для японских строк, которым не нашлось ромадзи в NetEase, — один запрос на трек, результат кэшируется навсегда. Модель задаётся в `GEMINI_MODEL`, можно несколько через запятую: если одна перегружена или снята, берётся следующая. Проверка с ВМ: `cd /opt/lyrics-tv/backend && sudo ../venv/bin/python -m lyrics_tv.romaji`. Если ключа нет, текст всё равно показывается, просто без ромадзи у этих строк.
 
 ## 3. Установка на ВМ
 
@@ -137,7 +137,7 @@ cd backend
 | `ACCESS_KEY` | — | ключ в адресе экрана `?key=` (обязателен вне демо) |
 | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` | — | из Spotify Dashboard |
 | `SPOTIFY_REDIRECT_URI` | `http://127.0.0.1:8888/callback` | должен совпадать с дашбордом |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | —, `gemini-flash-latest` | ромадзи для строк без romalrc |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | —, `gemini-flash-latest` | ромадзи; `GEMINI_MODEL` можно списком через запятую — модели пробуются по очереди |
 | `LYRICS_OFFSET_MS` | 250 | сдвиг текста вперёд |
 | `IDLE_AFTER_S` | 180 | после такой паузы экран переходит в часы |
 | `DATA_DIR` | `backend/data` | токен, кэш, обложки |

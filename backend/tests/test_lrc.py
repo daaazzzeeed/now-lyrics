@@ -179,7 +179,7 @@ def test_netease_cloudsearch_with_romalrc_wins():
 def test_gemini_falls_back_on_overload(monkeypatch):
     from lyrics_tv import config as C, romaji
     monkeypatch.setattr(C, "GEMINI_API_KEY", "k")
-    monkeypatch.setattr(C, "GEMINI_MODEL", "gemini-3.8-flash")
+    monkeypatch.setattr(C, "GEMINI_MODELS", ["gemini-3.8-flash"])
     seen = []
 
     def handler(req):

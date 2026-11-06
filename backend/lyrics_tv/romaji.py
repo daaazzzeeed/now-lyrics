@@ -45,13 +45,13 @@ async def gemini_romaji(client: httpx.AsyncClient, texts: list[str], hints: list
             "responseSchema": {"type": "ARRAY", "items": {"type": "STRING"}},
         },
     }
-    models = list(dict.fromkeys([C.GEMINI_MODEL, *FALLBACK_MODELS]))
+    models = list(dict.fromkeys([*C.GEMINI_MODELS, *FALLBACK_MODELS]))
     errors = []
     for model in models:
         # 404 — модель сняли, 429 — квота, 5xx — перегрузка: пробуем следующую модель
         url = f"{C.GEMINI_BASE}/v1beta/models/{model}:generateContent"
         try:
-            r = await client.post(url, json=body, headers={"x-goog-api-key": C.GEMINI_API_KEY}, timeout=90)
+            r = await client.post(url, json=body, headers={"x-goog-api-key": C.GEMINI_API_KEY}, timeout=httpx.Timeout(45, connect=10))
         except httpx.HTTPError as e:
             errors.append(f"{model}: сеть {e!r}")
             continue
@@ -69,7 +69,7 @@ async def gemini_romaji(client: httpx.AsyncClient, texts: list[str], hints: list
         if not isinstance(out, list) or len(out) != len(texts):
             errors.append(f"{model}: длина ответа {len(out) if isinstance(out, list) else '?'} ≠ {len(texts)}")
             continue
-        if model != C.GEMINI_MODEL:
+        if model != models[0]:
             log.info("Gemini: ответила запасная модель %s", model)
         return [s.strip().lower() if isinstance(s, str) else "" for s in out]
     raise RomajiFailed("; ".join(errors))
@@ -103,7 +103,8 @@ async def fill_romaji(client: httpx.AsyncClient, lyr: dict) -> bool:
 
 async def _check(texts: list[str]) -> None:
     """Проверка с ВМ: sudo ../venv/bin/python -m lyrics_tv.romaji 突然のキスや熱いまなざしで"""
-    print(f"модель: {C.GEMINI_MODEL}, ключ: {'есть' if C.GEMINI_API_KEY else 'НЕ ЗАДАН'}")
+    print(f"модели: {', '.join(C.GEMINI_MODELS)} (+ {', '.join(FALLBACK_MODELS)}), "
+          f"ключ: {'есть' if C.GEMINI_API_KEY else 'НЕ ЗАДАН'}")
     async with httpx.AsyncClient() as client:
         try:
             for t, r in zip(texts, await gemini_romaji(client, texts)):
