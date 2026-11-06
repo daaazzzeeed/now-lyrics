@@ -110,7 +110,7 @@ def test_palette_worker(tmp_path):
     out = subprocess.run([sys.executable, "-m", "lyrics_tv.palette_worker", str(img)], cwd=BACKEND,
                          capture_output=True, text=True, check=True)
     pal = json.loads(out.stdout)
-    assert set(pal) == {"bg", "card", "glow"}
+    assert {"bg", "card", "glow"} <= set(pal)
     r, g, b = (int(pal["card"][i:i + 2], 16) for i in (1, 3, 5))
     assert r > g and r > b  # оттенок взят у красного, а не у чёрного
 
@@ -213,3 +213,17 @@ def test_gemini_bad_key_does_not_try_others(monkeypatch):
     with pytest.raises(romaji.RomajiFailed, match="API key not valid"):
         asyncio.run(go())
     assert len(seen) == 1
+
+
+@pytest.mark.parametrize("rgb", [(190, 225, 250), (250, 240, 170), (200, 250, 210), (255, 200, 220), (230, 230, 230)])
+def test_card_contrast_on_light_covers(tmp_path, rgb):
+    PIL = pytest.importorskip("PIL.Image")
+    import colorsys
+    from lyrics_tv.palette_worker import contrast_white, palette
+    img = tmp_path / "c.jpg"
+    PIL.new("RGB", (64, 64), rgb).save(img)
+    pal = palette(str(img))
+    r, g, b = (int(pal["card"][i:i + 2], 16) / 255 for i in (1, 3, 5))
+    assert colorsys.rgb_to_hls(r, g, b)[1] <= 0.42 + 0.01
+    assert contrast_white(pal["card"]) >= 4.0
+    assert pal["v"] == 2

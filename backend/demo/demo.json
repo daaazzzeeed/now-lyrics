@@ -14,8 +14,20 @@
       "romalrc": "[00:04.00]shizuka na eki de shihatsu o matteru\n[00:09.50]shiroi iki ga yukkuri sora ni toketa\n[00:15.00]mada namae no nai asa no hikari\n[00:20.50]kimi ni todoku made aruite ikou\n[00:31.00]tooi machi no akari ga kiete iku\n[00:36.50]senro zoi ni saita chiisana hana\n[00:42.00]kyou dake wa yukkuri susumou\n[00:47.50]yoake no sanpo futari de"
     },
     {
+      "id": "demoJp02",
+      "title": "空色のノート",
+      "artists": [
+        "サンプル・バンド"
+      ],
+      "album": "デモ",
+      "duration_ms": 48000,
+      "cover": "cover_sky.jpg",
+      "lrc": "[00:03.00]窓をあけて青い風を呼ぶ\n[00:08.50]白いページに今日を書いた\n[00:14.00]雲の形を数えながら\n[00:19.50]ゆっくり午後が流れていく\n[00:25.00]\n[00:29.00]空色のノートを閉じて\n[00:34.50]また明日ここで会おう\n[00:40.00]",
+      "romalrc": "[00:03.00]mado o akete aoi kaze o yobu\n[00:08.50]shiroi peeji ni kyou o kaita\n[00:14.00]kumo no katachi o kazoenagara\n[00:19.50]yukkuri gogo ga nagarete iku\n[00:29.00]sorairo no nooto o tojite\n[00:34.50]mata ashita koko de aou"
+    },
+    {
       "id": "demoEn01",
-      "title": "Folded Signals",
+      "title": "Folded Signals Over The Sleeping City Lights (Extended Late Night Drive Version, Part Two)",
       "artists": [
         "Sample Band",
         "Demo Voice"

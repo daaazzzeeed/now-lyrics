@@ -12,7 +12,7 @@ from . import config as C
 from .cache import Cache
 from .demo import DemoPlayer
 from .lrc import has_romaji, is_japanese, needs_romaji, promote_sub_to_romaji
-from .media import DEFAULT_PALETTE, compute_palette, ensure_cover, fallback_palette
+from .media import DEFAULT_PALETTE, compute_palette, ensure_cover, fallback_palette, palette_fresh
 from .romaji import fill_romaji
 from .sources import find_lyrics
 from .spotify import AuthRequired, RateLimited, Spotify, parse_item
@@ -173,14 +173,15 @@ class Hub:
     def new_track(self, info: dict) -> None:
         self.track = info
         cached = self.cache.get(info["id"]) or {}
-        self.palette = cached.get("palette") or fallback_palette(info["id"])
+        fresh_pal = palette_fresh(cached.get("palette"))
+        self.palette = cached["palette"] if fresh_pal else fallback_palette(info["id"])
         self.lyrics = cached.get("lyrics")
         checked = cached.get("checked", 0)
         fetch = not self.lyrics and time.time() - checked > C.NEGATIVE_RETRY_S
         self.lyrics_state = "ready" if self.lyrics else ("loading" if fetch else "none")
         romaji = bool(self.lyrics) and not cached.get("romaji_done") and is_japanese(self.lyrics)
-        if fetch or romaji or not cached.get("palette"):
-            self._spawn(self.prepare(info, fetch, not cached.get("palette")))
+        if fetch or romaji or not fresh_pal:
+            self._spawn(self.prepare(info, fetch, not fresh_pal))
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
