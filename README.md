@@ -4,6 +4,9 @@
 
 Музыка играет из Spotify (например, на WiiM Pro Plus). Бэкенд на ВМ сам узнаёт, что играет, находит текст (LRCLIB → NetEase), дописывает транслитерацию (romalrc → Gemini), собирает жирный CJK-шрифт под трек, считает палитру и отдаёт всё телевизору по Server-Sent Events. Приложение на ТВ — полноэкранный WebView, управления нет.
 
+<img width="1783" height="936" alt="image" src="https://github.com/user-attachments/assets/b0580cd8-93d6-4f7b-b57f-99a9944a6bae" />
+
+
 ```
 backend/     FastAPI-сервер, экран (web/), демо-данные, тесты
 android/     WebView-обёртка для Android TV
