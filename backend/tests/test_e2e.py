@@ -39,6 +39,7 @@ class Fake(BaseHTTPRequestHandler):
     flags: dict = {}
     calls: dict = {}
     gemini_inputs: list = []
+    gemini_hints: list = []
     img = b""
 
     def log_message(self, *a):
@@ -81,8 +82,10 @@ class Fake(BaseHTTPRequestHandler):
             assert self.headers.get("x-goog-api-key") == "gkey"
             body = json.loads(raw)
             assert body["generationConfig"]["responseMimeType"] == "application/json"
-            lines = json.loads(body["contents"][0]["parts"][0]["text"])
+            items = json.loads(body["contents"][0]["parts"][0]["text"])
+            lines = [x["ja"] for x in items]
             Fake.gemini_inputs.append(lines)
+            Fake.gemini_hints.append([x.get("hint") for x in items])
             out = [GEMINI_MAP.get(s, "?") for s in lines]
             return self._reply(200, {"candidates": [{"content": {"parts": [{"text": json.dumps(out)}]}}]})
         self._reply(404, {})
@@ -246,6 +249,7 @@ def test_netease_fallback_romalrc_and_gemini(srv):
     assert [ln.get("romaji") for ln in lines] == ["tesuto no ichigyoume desu", "nigyoume wa koko", None,
                                                   "sangyoume no uta"]
     assert Fake.gemini_inputs == [["二行目はここ", "三行目の歌"]]  # один запрос, только недостающие строки
+    assert Fake.gemini_hints == [["ni gyo u me wa ko ko", None]]   # слоговый romalrc уходит подсказкой
     assert m["offset"] == 250
     assert m["auth_days"] is not None and m["auth_days"] <= 10  # пора показывать плашку
     assert p["palette"]

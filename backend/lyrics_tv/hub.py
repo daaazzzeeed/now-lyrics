@@ -111,7 +111,7 @@ class Hub:
             except Exception as e:  # noqa: BLE001 — сеть, таймауты, что угодно
                 errors += 1
                 delay = float(min(60, 2 ** min(errors, 6)))
-                log.warning("опрос: %s", e)
+                log.warning("опрос: %r", e)
             try:
                 await asyncio.wait_for(self.wake.wait(), delay)
             except asyncio.TimeoutError:
