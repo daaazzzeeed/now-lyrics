@@ -28,8 +28,14 @@ def _hex(h: float, l: float, s: float) -> str:
 
 def fallback_palette(tid: str) -> dict:
     """Пока считается настоящая палитра (или если обложки нет) — оттенок по хешу трека."""
+    from .palette_worker import card_color
     h = int(hashlib.md5(tid.encode()).hexdigest()[:4], 16) / 65535
-    return {"bg": _hex(h, 0.14, 0.22), "card": _hex(h, 0.40, 0.28), "glow": _hex(h, 0.32, 0.40)}
+    return {"bg": _hex(h, 0.14, 0.22), "card": card_color(h, 0.33), "glow": _hex(h, 0.32, 0.40)}
+
+
+def palette_fresh(pal: dict | None) -> bool:
+    from .palette_worker import VERSION
+    return isinstance(pal, dict) and pal.get("v") == VERSION
 
 
 def cover_path(tid: str) -> Path:

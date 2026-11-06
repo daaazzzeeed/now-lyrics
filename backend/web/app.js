@@ -11,7 +11,7 @@
   var body = document.body;
   var el = {
     bgA: $('bgA'), bgB: $('bgB'), cover: $('cover'), coverA: $('coverA'), coverB: $('coverB'),
-    title: $('title'), artist: $('artist'), fill: $('fill'), knob: $('knob'),
+    title: $('title'), titleText: $('titleText'), artist: $('artist'), fill: $('fill'), knob: $('knob'),
     elapsed: $('elapsed'), remaining: $('remaining'),
     lyrics: $('lyrics'), hint: $('hint'), viewport: $('viewport'), lines: $('lines'),
     time: $('time'), date: $('date'), clock: $('clock'),
@@ -69,6 +69,30 @@
     };
     back.src = url;
   }
+
+  // ── длинное название: до двух строк, иначе бегущая строка (только transform) ──
+  var titleAnim = null, fitTimer = null;
+  function fitTitle() {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(function () {   // после раскладки и смены режима постера
+      if (titleAnim) { titleAnim.cancel(); titleAnim = null; }
+      el.title.classList.remove('marquee');
+      if (el.title.scrollHeight <= el.title.clientHeight + 2) return;   // влезло в две строки
+      el.title.classList.add('marquee');
+      var dist = el.titleText.scrollWidth - el.title.clientWidth * 0.92;
+      if (dist <= 0 || !el.titleText.animate) return;
+      var move = Math.max(4000, dist / (window.innerHeight * 0.06) * 1000);   // ~6vh в секунду
+      var pause = 3000, total = 2 * pause + 2 * move;
+      titleAnim = el.titleText.animate([
+        { transform: 'translate3d(0,0,0)', offset: 0 },
+        { transform: 'translate3d(0,0,0)', offset: pause / total, easing: 'ease-in-out' },
+        { transform: 'translate3d(' + (-dist) + 'px,0,0)', offset: (pause + move) / total },
+        { transform: 'translate3d(' + (-dist) + 'px,0,0)', offset: (2 * pause + move) / total, easing: 'ease-in-out' },
+        { transform: 'translate3d(0,0,0)', offset: 1 }
+      ], { duration: total, iterations: Infinity });
+    }, 60);
+  }
+  if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', fitTitle);
 
   // ── текст ──
   function setSub(d, text) {
@@ -225,12 +249,14 @@
     var tr = m.track;
     if (tr && tr.id !== trackId) {
       trackId = tr.id;
-      el.title.textContent = tr.title;
+      el.titleText.textContent = tr.title;
+      fitTitle();
       el.artist.textContent = tr.artists;
       setCover(tr.cover + (tr.cover.indexOf('?') < 0 ? '?' : '&') + 'key=' + encodeURIComponent(KEY));
       lastSec = -1;
     }
-    body.classList.toggle('bare', !!tr && m.lyrics_state === 'none');
+    var bare = !!tr && m.lyrics_state === 'none';
+    if (bare !== body.classList.contains('bare')) { body.classList.toggle('bare', bare); fitTitle(); }
     renderLyrics();
     activeIdx = -2;
 
@@ -285,7 +311,7 @@
     el.clock.style.transform = 'translate(' + (Math.random() * 4 - 2).toFixed(2) + 'vw,' + (Math.random() * 4 - 2).toFixed(2) + 'vh)';
   }, 60000);
 
-  window.addEventListener('resize', function () { activeIdx = -2; lastY = -1; });
+  window.addEventListener('resize', function () { activeIdx = -2; lastY = -1; fitTitle(); });
 
   connect();
   requestAnimationFrame(frame);

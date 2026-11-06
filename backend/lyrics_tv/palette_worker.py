@@ -35,12 +35,41 @@ def dominant(path: str) -> tuple[float, float, float]:
     return scored[0][2]
 
 
+VERSION = 2          # поднимать при изменении формулы — палитры в кэше пересчитаются
+CARD_MAX_L = 0.42
+MIN_CONTRAST = 4.0   # белый текст на карточке, WCAG
+
+
+def luminance(hexcolor: str) -> float:
+    def ch(v: int) -> float:
+        c = v / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
+    return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+
+
+def contrast_white(hexcolor: str) -> float:
+    return 1.05 / (luminance(hexcolor) + 0.05)
+
+
+def card_color(h: float, s: float) -> str:
+    """Карточка «Текст»: L ≤ 0.42, затем темнее шагами, пока белый не станет читаемым (≥ 4:1)."""
+    sat = min(s * 0.85, 0.36)
+    l = min(0.40, CARD_MAX_L)
+    color = hx(h, l, sat)
+    while contrast_white(color) < MIN_CONTRAST and l > 0.12:
+        l -= 0.02
+        color = hx(h, l, sat)
+    return color
+
+
 def palette(path: str) -> dict:
     h, _, s = dominant(path)
     return {
         "bg": hx(h, 0.14, min(s, 0.32)),
-        "card": hx(h, 0.40, min(s * 0.85, 0.36)),
+        "card": card_color(h, s),
         "glow": hx(h, 0.34, min(s, 0.55)),
+        "v": VERSION,
     }
 
 
