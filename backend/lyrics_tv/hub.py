@@ -20,6 +20,7 @@ from .spotify import AuthRequired, RateLimited, Spotify, parse_item
 log = logging.getLogger("hub")
 
 STALE_S = 20
+ROMAJI_RETRY_S = (0, 20, 60)
 
 
 def dumps(msg: dict) -> str:
@@ -244,8 +245,15 @@ class Hub:
         if not any(needs_romaji(ln) for ln in lyrics["lines"]):
             self.cache.update(tid, romaji_done=True)
             return
-        if not await fill_romaji(self.client, lyrics):
-            return  # Gemini недоступен — попробуем, когда трек заиграет снова
+        for pause in ROMAJI_RETRY_S:  # Gemini бывает перегружен — пару раз повторяем, пока трек играет
+            if pause:
+                await asyncio.sleep(pause)
+                if not self._current(tid):
+                    return
+            if await fill_romaji(self.client, lyrics):
+                break
+        else:
+            return  # не вышло — попробуем, когда трек заиграет снова
         self.cache.update(tid, lyrics=lyrics, romaji_done=True)
         if self._current(tid):
             self.lyrics = lyrics
