@@ -136,8 +136,21 @@ def has_romaji(lyr: dict | None) -> bool:
     return bool(lyr) and any(ln.get("romaji") for ln in lyr["lines"])
 
 
+def is_syllabic(romaji: str) -> bool:
+    """romalrc NetEase часто разбит по слогам: «to tsu ze n no ki su ya» вместо «totsuzen no kisu ya»."""
+    tokens = re.findall(r"[a-zāēīōū]+", (romaji or "").lower())
+    if len(tokens) < 4:
+        return False
+    short = sum(1 for t in tokens if len(t) <= 3) / len(tokens)
+    avg = sum(map(len, tokens)) / len(tokens)
+    return short >= 0.85 and avg <= 2.4
+
+
 def needs_romaji(ln: dict) -> bool:
-    return bool(ln.get("text")) and bool(JP_TEXT.search(ln["text"])) and not ln.get("romaji")
+    """Японская строка без ромадзи — или с ромадзи по слогам, который лучше переделать."""
+    if not ln.get("text") or not JP_TEXT.search(ln["text"]):
+        return False
+    return not ln.get("romaji") or is_syllabic(ln["romaji"])
 
 
 def promote_sub_to_romaji(lyr: dict) -> None:

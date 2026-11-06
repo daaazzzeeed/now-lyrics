@@ -22,7 +22,8 @@ BACKEND = Path(__file__).resolve().parent.parent
 TRACK_ID = "track42"
 NE_LRC = ("[by:someone]\n[00:00.00] 作词 : 誰か\n[00:00.50] 作曲 : 誰か\n"
           "[00:10.00]テストの一行目です\n[00:15.00]二行目はここ\n[00:20.00]\n[00:24.00]三行目の歌\n")
-NE_ROMA = "[00:10.10]tesuto no ichigyoume desu\n"  # romalrc только для первой строки
+NE_ROMA = ("[00:10.10]tesuto no ichigyoume desu\n"   # нормальный ромадзи
+           "[00:15.00]ni gyo u me wa ko ko\n")         # по слогам — переделает Gemini; третьей строки нет
 GEMINI_MAP = {"二行目はここ": "nigyoume wa koko", "三行目の歌": "sangyoume no uta"}
 
 
@@ -67,13 +68,15 @@ class Fake(BaseHTTPRequestHandler):
             if form.get("grant_type") == ["authorization_code"]:
                 return self._reply(200, {"access_token": "AT", "refresh_token": "RT2", "expires_in": 3600})
             return self._reply(200, {"access_token": "AT", "expires_in": 3600})
-        if path == "/api/search/get/web":
+        if path == "/api/search/get/web":  # как настоящий NetEase с 2026 года: result зашифрован
+            return self._reply(200, {"result": "35b1748964af8a7c1d883e3a6f3c773b", "code": 200})
+        if path == "/api/cloudsearch/pc":
             form = urllib.parse.parse_qs(raw.decode())
             assert form["type"] == ["1"] and form["limit"] == ["10"]
             assert self.headers.get("Referer", "").startswith("https://music.163.com")
             return self._reply(200, {"result": {"songs": [
                 {"id": 1, "name": "別の歌", "artists": [{"name": "誰か"}], "duration": 201000},
-                {"id": 42, "name": "テストの歌", "artists": [{"name": "テスト"}], "duration": 202000}]}})
+                {"id": 42, "name": "テストの歌", "ar": [{"name": "テスト"}], "dt": 202000}]}})
         if path.startswith("/v1beta/models/") and path.endswith(":generateContent"):
             assert self.headers.get("x-goog-api-key") == "gkey"
             body = json.loads(raw)
