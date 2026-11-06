@@ -23,7 +23,7 @@ PROMPT = (
     "they are sung, using the context of the whole song; keep Latin words and punctuation as they are; "
     "never translate; never merge or split lines."
 )
-FALLBACK_MODEL = "gemini-flash-latest"
+FALLBACK_MODELS = ("gemini-flash-latest", "gemini-flash-lite-latest")
 
 
 class RomajiFailed(Exception):
@@ -45,27 +45,41 @@ async def gemini_romaji(client: httpx.AsyncClient, texts: list[str], hints: list
             "responseSchema": {"type": "ARRAY", "items": {"type": "STRING"}},
         },
     }
-    models = [C.GEMINI_MODEL] + ([FALLBACK_MODEL] if C.GEMINI_MODEL != FALLBACK_MODEL else [])
-    for i, model in enumerate(models):
+    models = list(dict.fromkeys([C.GEMINI_MODEL, *FALLBACK_MODELS]))
+    errors = []
+    for model in models:
+        # 404 — модель сняли, 429 — квота, 5xx — перегрузка: пробуем следующую модель
         url = f"{C.GEMINI_BASE}/v1beta/models/{model}:generateContent"
         try:
             r = await client.post(url, json=body, headers={"x-goog-api-key": C.GEMINI_API_KEY}, timeout=90)
         except httpx.HTTPError as e:
-            raise RomajiFailed(f"сеть: {e!r}") from e
-        if r.status_code == 404 and i + 1 < len(models):  # модель сняли — пробуем запасную
-            log.warning("Gemini: модель %s недоступна (404), пробую %s", model, models[i + 1])
+            errors.append(f"{model}: сеть {e!r}")
             continue
         if r.status_code != 200:
-            raise RomajiFailed(f"{model}: HTTP {r.status_code}: {r.text[:300]}")
-        break
+            errors.append(f"{model}: HTTP {r.status_code} {_short_error(r)}")
+            if r.status_code in (404, 429) or r.status_code >= 500:
+                continue
+            break  # 400/401/403 — ключ или запрос, другие модели не помогут
+        try:
+            parts = r.json()["candidates"][0]["content"]["parts"]
+            out = json.loads("".join(p.get("text", "") for p in parts))
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            errors.append(f"{model}: непонятный ответ {e!r}")
+            continue
+        if not isinstance(out, list) or len(out) != len(texts):
+            errors.append(f"{model}: длина ответа {len(out) if isinstance(out, list) else '?'} ≠ {len(texts)}")
+            continue
+        if model != C.GEMINI_MODEL:
+            log.info("Gemini: ответила запасная модель %s", model)
+        return [s.strip().lower() if isinstance(s, str) else "" for s in out]
+    raise RomajiFailed("; ".join(errors))
+
+
+def _short_error(r: httpx.Response) -> str:
     try:
-        parts = r.json()["candidates"][0]["content"]["parts"]
-        out = json.loads("".join(p.get("text", "") for p in parts))
-    except (KeyError, IndexError, TypeError, ValueError) as e:
-        raise RomajiFailed(f"непонятный ответ: {e!r}: {r.text[:300]}") from e
-    if not isinstance(out, list) or len(out) != len(texts):
-        raise RomajiFailed(f"длина ответа {len(out) if isinstance(out, list) else '?'} ≠ {len(texts)}")
-    return [s.strip().lower() if isinstance(s, str) else "" for s in out]
+        return str(r.json()["error"]["message"])[:160]
+    except (ValueError, KeyError, TypeError):
+        return r.text[:160]
 
 
 async def fill_romaji(client: httpx.AsyncClient, lyr: dict) -> bool:

@@ -174,3 +174,42 @@ def test_netease_cloudsearch_with_romalrc_wins():
     assert lyr["source"] == "netease"
     assert lyr["lines"] == [{"t": 30710, "text": "突然のキスや", "romaji": "to tsu ze n no ki su ya"}]
     assert lrc.needs_romaji(lyr["lines"][0])  # слоговый — уйдёт в Gemini
+
+
+def test_gemini_falls_back_on_overload(monkeypatch):
+    from lyrics_tv import config as C, romaji
+    monkeypatch.setattr(C, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(C, "GEMINI_MODEL", "gemini-3.8-flash")
+    seen = []
+
+    def handler(req):
+        model = req.url.path.split("/models/")[1].split(":")[0]
+        seen.append(model)
+        if model == "gemini-3.8-flash":
+            return httpx.Response(503, json={"error": {"message": "high demand"}})
+        if model == "gemini-flash-latest":
+            return httpx.Response(404, json={"error": {"message": "gone"}})
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": '["totsuzen no kisu ya"]'}]}}]})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await romaji.gemini_romaji(client, ["突然のキスや"], ["to tsu ze n no ki su ya"])
+    assert asyncio.run(go()) == ["totsuzen no kisu ya"]
+    assert seen == ["gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+
+
+def test_gemini_bad_key_does_not_try_others(monkeypatch):
+    from lyrics_tv import config as C, romaji
+    monkeypatch.setattr(C, "GEMINI_API_KEY", "k")
+    seen = []
+
+    def handler(req):
+        seen.append(req.url.path)
+        return httpx.Response(400, json={"error": {"message": "API key not valid"}})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await romaji.gemini_romaji(client, ["突然"])
+    with pytest.raises(romaji.RomajiFailed, match="API key not valid"):
+        asyncio.run(go())
+    assert len(seen) == 1
