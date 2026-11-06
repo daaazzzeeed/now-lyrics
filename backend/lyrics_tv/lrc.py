@@ -17,11 +17,19 @@ PURE_MUSIC = re.compile(r"纯音乐|請欣賞|请欣赏")
 KANA = re.compile(r"[぀-ゟ゠-ヿㇰ-ㇿｦ-ﾟ]")
 JP_TEXT = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
 CJK_ANY = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ가-힯]")
+HAN = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+HANGUL = re.compile(r"[가-힯ᄀ-ᇿ㄰-㆏]")
+# частые иероглифы, которые в традиционном и упрощённом письме различаются
+TRAD_ONLY = set("們個來說時會為這國對還過愛裡樣點開關問發讓聽見風車東書長門當實現經學無與後動體從頭將麼話歲夢淚邊總離誰顏戀聲憶")
+SIMP_ONLY = set("们个来说时会为这国对还过爱里样点开关问发让听见风车东书长门当实现经学无与后动体从头将么话岁梦泪边总离谁颜恋声忆")
 
 CREDIT_WINDOW_MS = 60_000
 SAME_TIME_MS = 15
-ROMAJI_TOLERANCE_MS = 400
-DURATION_TOLERANCE_S = 3
+TRANSLIT_TOLERANCE_MS = 400
+DURATION_TOLERANCE_MS = 2000
+SCALE_MIN_DIFF_MS = 1000
+SCALE_MAX_RATIO = 0.05
+LANGS = ("ja", "ko", "zh", "yue")
 
 
 def is_credit(text: str, t: int) -> bool:
@@ -93,8 +101,8 @@ def lyrics_from_lrc(synced_text: str, plain_text: str, source: str) -> dict | No
     return None
 
 
-def attach(lines: list[dict], extra: list[dict], field: str = "romaji",
-           tolerance: int = ROMAJI_TOLERANCE_MS) -> None:
+def attach(lines: list[dict], extra: list[dict], field: str = "translit",
+           tolerance: int = TRANSLIT_TOLERANCE_MS) -> None:
     """Приклеивает строки второй дорожки (romalrc) к основной по ближайшему таймкоду."""
     extra = sorted((e for e in extra if e.get("text")), key=lambda e: e["t"])
     ts = [e["t"] for e in extra]
@@ -121,19 +129,48 @@ def clean_title(title: str) -> str:
     return t.strip() or title
 
 
+# ── язык и транслитерация ──
+
+def _texts(lyr: dict | None) -> list[str]:
+    return [ln["text"] for ln in (lyr or {}).get("lines", []) if ln.get("text")]
+
+
 def is_japanese(lyr: dict | None) -> bool:
     """Японский трек — если кана есть хотя бы в 10% строк."""
-    if not lyr:
-        return False
-    texts = [ln["text"] for ln in lyr["lines"] if ln.get("text")]
-    if not texts:
-        return False
+    texts = _texts(lyr)
     n = sum(1 for s in texts if KANA.search(s))
-    return n >= 1 and n >= 0.1 * len(texts)
+    return bool(texts) and n >= 1 and n >= 0.1 * len(texts)
 
 
-def has_romaji(lyr: dict | None) -> bool:
-    return bool(lyr) and any(ln.get("romaji") for ln in lyr["lines"])
+def detect_lang(texts: list[str]) -> str | None:
+    """Язык по тексту: хангыль → ko, кана → ja (даже если часть строк только из кандзи), иероглифы → zh."""
+    joined = "\n".join(texts)
+    if HANGUL.search(joined):
+        return "ko"
+    if KANA.search(joined):
+        return "ja"
+    if HAN.search(joined):
+        return "zh"
+    return None
+
+
+def lyrics_lang(lyr: dict | None) -> str | None:
+    texts = _texts(lyr)
+    if any(HANGUL.search(s) for s in texts):
+        return "ko"
+    if is_japanese(lyr):
+        return "ja"
+    return detect_lang(texts)
+
+
+def is_traditional(text: str) -> bool:
+    trad = sum(1 for ch in text if ch in TRAD_ONLY)
+    simp = sum(1 for ch in text if ch in SIMP_ONLY)
+    return trad > simp
+
+
+def has_translit(lyr: dict | None) -> bool:
+    return bool(lyr) and any(ln.get("translit") for ln in lyr["lines"])
 
 
 def is_syllabic(romaji: str) -> bool:
@@ -146,41 +183,101 @@ def is_syllabic(romaji: str) -> bool:
     return short >= 0.85 and avg <= 2.4
 
 
-def needs_romaji(ln: dict) -> bool:
-    """Японская строка без ромадзи — или с ромадзи по слогам, который лучше переделать."""
-    if not ln.get("text") or not JP_TEXT.search(ln["text"]):
+def script_of(lang: str | None):
+    return {"ja": JP_TEXT, "ko": HANGUL, "zh": HAN, "yue": HAN}.get(lang or "")
+
+
+def needs_translit(ln: dict, lang: str | None) -> bool:
+    """Строка на языке трека без транслитерации — или с транслитерацией по слогам (её лучше переделать).
+    Строки без CJK и хангыля (например, английские) не трогаем."""
+    rx = script_of(lang)
+    if not rx or not ln.get("text") or not rx.search(ln["text"]):
         return False
-    return not ln.get("romaji") or is_syllabic(ln["romaji"])
+    tr = ln.get("translit")
+    return not tr or (lang in ("ja", "ko") and is_syllabic(tr))
 
 
-def promote_sub_to_romaji(lyr: dict) -> None:
-    """В некоторых LRC ромадзи лежит второй строкой с тем же таймкодом — переносим из sub."""
+def promote_sub_to_translit(lyr: dict) -> None:
+    """В некоторых LRC транслитерация лежит второй строкой с тем же таймкодом — переносим из sub."""
     for ln in lyr["lines"]:
         sub = ln.get("sub")
-        if sub and not ln.get("romaji") and KANA.search(ln.get("text", "")) and not CJK_ANY.search(sub):
-            ln["romaji"] = ln.pop("sub")
+        if sub and not ln.get("translit") and CJK_ANY.search(ln.get("text", "")) and not CJK_ANY.search(sub) \
+                and re.search(r"[a-z]", sub) and not re.search(r"[а-яё]", sub, re.I):
+            ln["translit"] = ln.pop("sub")
 
 
-def pick_lrclib(items: list, dur_s: int) -> dict | None:
-    """Кандидаты LRCLIB с длительностью ±3 с, синхронизированные в приоритете."""
-    good = [x for x in items if isinstance(x, dict)
-            and abs((x.get("duration") or 0) - dur_s) <= DURATION_TOLERANCE_S
-            and (x.get("syncedLyrics") or x.get("plainLyrics"))]
-    good.sort(key=lambda x: (0 if x.get("syncedLyrics") else 1, abs((x.get("duration") or 0) - dur_s)))
-    return good[0] if good else None
+def migrate(lyr: dict | None) -> dict | None:
+    """Старый кэш: поле romaji → translit."""
+    if not lyr:
+        return lyr
+    for ln in lyr.get("lines", []):
+        if "romaji" in ln:
+            r = ln.pop("romaji")
+            ln.setdefault("translit", r)
+    return lyr
 
 
-def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int) -> dict | None:
-    """Кандидат NetEase подходит, если длительность ±3 с и совпал артист или название."""
+# ── тайминги ──
+
+def scale_factor(record_ms: int | None, spotify_ms: int | None) -> float:
+    """Растущий сдвиг: текст от записи другой длины. Масштабируем, только если разница > 1 с и < 5%."""
+    if not record_ms or not spotify_ms:
+        return 1.0
+    diff = abs(spotify_ms - record_ms)
+    if diff <= SCALE_MIN_DIFF_MS or diff >= SCALE_MAX_RATIO * record_ms:
+        return 1.0
+    return spotify_ms / record_ms
+
+
+def adjust(lyr: dict, spotify_ms: int | None, offset_ms: int = 0) -> dict:
+    """Копия текста для клиента: таймкоды × масштаб + ручная поправка трека."""
+    k = scale_factor(lyr.get("duration_ms"), spotify_ms)
+    if k == 1.0 and not offset_ms:
+        out = dict(lyr)
+    else:
+        out = dict(lyr, lines=[dict(ln, t=max(0, round(ln["t"] * k) + offset_ms)) if "t" in ln else ln
+                               for ln in lyr["lines"]])
+    out["adj"] = {"scale": round(k, 5), "offset_ms": offset_ms}
+    return out
+
+
+# ── выбор кандидатов ──
+
+def pick_lrclib(items: list, dur_ms: int, album: str = "") -> dict | None:
+    """LRCLIB: длительность ±2 с, синхронизированные в приоритете, затем ближайшая длительность,
+    при равенстве — совпадение альбома."""
+    want_album = norm(album)
+    good = []
+    for x in items:
+        if not isinstance(x, dict) or not (x.get("syncedLyrics") or x.get("plainLyrics")):
+            continue
+        diff = abs((x.get("duration") or 0) * 1000 - dur_ms)
+        if diff > DURATION_TOLERANCE_MS:
+            continue
+        a = norm(x.get("albumName") or "")
+        album_ok = bool(want_album and a and (a == want_album or want_album in a or a in want_album))
+        good.append(((0 if x.get("syncedLyrics") else 1, round(diff / 500), 0 if album_ok else 1, diff), x))
+    good.sort(key=lambda g: g[0])
+    return good[0][1] if good else None
+
+
+def netease_duration(song: dict) -> int:
+    return int(song.get("duration") or song.get("dt") or 0)
+
+
+def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int, album: str = "") -> dict | None:
+    """NetEase: длительность ±2 с и совпал артист или название; ближе по длительности лучше,
+    при равенстве — артист, альбом, название."""
     want_t = norm(clean_title(title))
     want_a = [norm(a) for a in artists if norm(a)]
-    best, best_score = None, -1.0
+    want_album = norm(album)
+    good = []
     for song in songs or []:
         if not isinstance(song, dict):
             continue
-        sd = song.get("duration") or song.get("dt") or 0
+        sd = netease_duration(song)
         diff = abs(sd - dur_ms) if sd else 10 ** 9
-        if diff > DURATION_TOLERANCE_S * 1000:
+        if diff > DURATION_TOLERANCE_MS:
             continue
         names = [norm(a.get("name", "")) for a in (song.get("artists") or song.get("ar") or []) if isinstance(a, dict)]
         a_ok = any(a and (a in b or b in a) for a in names for b in want_a)
@@ -188,7 +285,8 @@ def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int) -> di
         t_ok = bool(t and want_t) and (t == want_t or t in want_t or want_t in t)
         if not (a_ok or t_ok):
             continue
-        score = 5 * a_ok + 3 * t_ok + (3 - diff / 1000)
-        if score > best_score:
-            best, best_score = song, score
-    return best
+        alb = norm(((song.get("album") or song.get("al") or {}) or {}).get("name", ""))
+        album_ok = bool(want_album and alb and (alb == want_album or want_album in alb or alb in want_album))
+        good.append(((round(diff / 500), not a_ok, not album_ok, not t_ok, diff), song))
+    good.sort(key=lambda g: g[0])
+    return good[0][1] if good else None

@@ -155,6 +155,16 @@ class Spotify:
         raise AuthRequired()
 
 
+    async def queue(self) -> list[dict]:
+        """Очередь воспроизведения (первым — следующий трек). Опрашивается раз в смену трека."""
+        token = await self._access_token()
+        r = await self.client.get(f"{C.SPOTIFY_API}/me/player/queue", headers={"Authorization": f"Bearer {token}"})
+        if r.status_code != 200:
+            raise RuntimeError(f"/me/player/queue → HTTP {r.status_code}")
+        js = r.json()
+        return [x for x in (js.get("queue") or []) if isinstance(x, dict)] if isinstance(js, dict) else []
+
+
 def parse_item(js: dict | None) -> dict | None:
     item = (js or {}).get("item")
     if not item:

@@ -51,12 +51,15 @@ SPOTIFY_API = env("SPOTIFY_API_BASE", "https://api.spotify.com/v1")
 LRCLIB_BASE = env("LRCLIB_BASE", "https://lrclib.net")
 NETEASE_BASE = env("NETEASE_BASE", "https://music.163.com")
 GEMINI_BASE = env("GEMINI_BASE", "https://generativelanguage.googleapis.com")
+# Noto Sans CJK Bold (OFL): {FONT_BASE}/JP/NotoSansJP-Bold.otf и т.д.
+FONT_BASE = env("FONT_BASE", "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/SubsetOTF")
 
 WEB_DIR = BASE / "web"
 DEMO_DIR = BASE / "demo"
 COVERS_DIR = DATA_DIR / "covers"
 TOKEN_FILE = DATA_DIR / "spotify_token.json"
 CACHE_DB = DATA_DIR / "cache.db"
+FONTS_DIR = DATA_DIR / "fonts"
 
 TOKEN_LIFETIME_DAYS = 182      # refresh-токен Spotify живёт ~6 месяцев с момента входа
 NEGATIVE_RETRY_S = 3 * 86400   # «текст не найден» перепроверяем раз в три дня

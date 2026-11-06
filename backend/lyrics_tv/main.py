@@ -1,4 +1,4 @@
-"""HTTP: экран, SSE, обложки, вход в Spotify. Запуск: python -m lyrics_tv"""
+"""HTTP: экран, SSE, обложки, шрифты, вход в Spotify, служебные /debug/*. Запуск: python -m lyrics_tv"""
 from __future__ import annotations
 
 import asyncio
@@ -9,13 +9,16 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 from . import config as C
 from .cache import Cache
 from .demo import DemoPlayer
 from .hub import Hub, dumps
+from .fonts import ensure_subset
+from .lrc import LANGS
 from .media import cover_path, ensure_cover
 from .spotify import Spotify
 
@@ -45,7 +48,7 @@ async def lifespan(app: FastAPI):
     poller = asyncio.create_task(hub.run())
     mode = "ДЕМО" if C.DEMO else ("Spotify подключён" if spotify.logged_in else "нужен вход в Spotify")
     log.info("Lyrics TV на порту %s (%s); Gemini: %s", C.PORT, mode,
-             C.GEMINI_MODEL if C.GEMINI_API_KEY else "ключ не задан — ромадзи только из NetEase")
+             ", ".join(C.GEMINI_MODELS) if C.GEMINI_API_KEY else "ключ не задан — транслитерация только из NetEase")
     if not C.ACCESS_KEY and not C.DEMO:
         log.warning("ACCESS_KEY не задан — экран будет отвечать 403")
     try:
@@ -129,6 +132,103 @@ async def cover(tid: str, request: Request):
     if not path.exists():
         return PlainTextResponse("no cover", status_code=404)
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=604800"})
+
+
+@app.get("/font/{tid}.woff2")
+async def font(tid: str, request: Request):
+    """Жирное подмножество Noto Sans CJK под текущий трек (символы текста и названия)."""
+    if not key_ok(request):
+        return forbidden()
+    hub: Hub = request.app.state.hub
+    if not hub.track or hub.track["id"] != tid:
+        return PlainTextResponse("not current", status_code=404)
+    try:
+        path = await ensure_subset(hub.client, hub.track, hub.raw, hub.lang)
+    except Exception as e:  # noqa: BLE001
+        log.warning("шрифт %s: %s", tid, e)
+        path = None
+    if not path:
+        return PlainTextResponse("no font", status_code=404)
+    return FileResponse(path, media_type="font/woff2", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+# ── служебное: диагностика и ручные поправки (под ключом, удобно открывать с телефона) ──
+
+def _track_id(request: Request) -> str | None:
+    hub: Hub = request.app.state.hub
+    return request.query_params.get("track") or (hub.track["id"] if hub.track else None)
+
+
+@app.get("/debug/track")
+async def debug_track(request: Request):
+    """Текущий трек: источник текста, длительности, поправки и все кандидаты LRCLIB и NetEase."""
+    if not key_ok(request):
+        return forbidden()
+    return JSONResponse(await request.app.state.hub.debug_info())
+
+
+@app.get("/debug/offset")
+async def debug_offset(request: Request):
+    """?ms=-1500 — текст на 1.5 с раньше; ?add=250 — сдвинуть ещё; ?ms= (пусто) — сбросить. &track=ID — не текущий."""
+    if not key_ok(request):
+        return forbidden()
+    hub: Hub = request.app.state.hub
+    tid = _track_id(request)
+    if not tid:
+        return JSONResponse({"error": "нет трека"}, status_code=400)
+    qp = request.query_params
+    try:
+        if "add" in qp:
+            cur = hub.cache.override(tid).get("offset_ms") or 0
+            ms = int(cur) + int(qp["add"])
+        else:
+            ms = int(qp["ms"]) if qp.get("ms") else None
+    except ValueError:
+        return JSONResponse({"error": "ms/add — целое число миллисекунд"}, status_code=400)
+    return JSONResponse({"track": tid, "override": hub.set_offset(tid, ms)})
+
+
+@app.get("/debug/source")
+async def debug_source(request: Request):
+    """?source=lrclib|netease&id=… — жёстко выбрать запись; ?source=auto — снова искать самому."""
+    if not key_ok(request):
+        return forbidden()
+    hub: Hub = request.app.state.hub
+    tid, qp = _track_id(request), request.query_params
+    source = qp.get("source", "")
+    if not tid or source not in ("lrclib", "netease", "auto") or (source != "auto" and not qp.get("id")):
+        return JSONResponse({"error": "нужно source=lrclib|netease&id=… или source=auto"}, status_code=400)
+    ov = hub.set_source(tid, None if source == "auto" else source, None if source == "auto" else qp["id"])
+    return JSONResponse({"track": tid, "override": ov})
+
+
+@app.get("/debug/lang")
+async def debug_lang(request: Request):
+    """?lang=yue — кантонский (Jyutping) для трека; &artist=Имя — для всех треков артиста; ?lang=auto — сброс."""
+    if not key_ok(request):
+        return forbidden()
+    hub: Hub = request.app.state.hub
+    qp = request.query_params
+    lang = qp.get("lang", "")
+    if lang not in (*LANGS, "auto"):
+        return JSONResponse({"error": f"lang: {', '.join(LANGS)} или auto"}, status_code=400)
+    tid = _track_id(request)
+    key = f"artist:{qp['artist'].casefold()}" if qp.get("artist") else (f"track:{tid}" if tid else None)
+    if not key:
+        return JSONResponse({"error": "нет трека"}, status_code=400)
+    return JSONResponse({"key": key, "override": hub.set_lang(key, None if lang == "auto" else lang, tid)})
+
+
+@app.get("/debug/refresh")
+async def debug_refresh(request: Request):
+    """Сбросить кэш текста трека и найти заново."""
+    if not key_ok(request):
+        return forbidden()
+    tid = _track_id(request)
+    if not tid:
+        return JSONResponse({"error": "нет трека"}, status_code=400)
+    request.app.state.hub.refresh(tid)
+    return JSONResponse({"track": tid, "refreshed": True})
 
 
 def auth_guard(request: Request):
