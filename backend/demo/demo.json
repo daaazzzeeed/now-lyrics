@@ -1,0 +1,39 @@
+{
+  "idle_ms": 15000,
+  "tracks": [
+    {
+      "id": "demoJp01",
+      "title": "夜明けの散歩",
+      "artists": [
+        "サンプル・バンド"
+      ],
+      "album": "デモ",
+      "duration_ms": 62000,
+      "cover": "cover_dawn.jpg",
+      "lrc": "[00:04.00]静かな駅で始発を待ってる\n[00:09.50]白い息がゆっくり空に溶けた\n[00:15.00]まだ名前のない朝の光\n[00:20.50]君に届くまで歩いていこう\n[00:26.00]\n[00:31.00]遠い街の灯りが消えていく\n[00:36.50]線路沿いに咲いた小さな花\n[00:42.00]今日だけはゆっくり進もう\n[00:47.50]夜明けの散歩 ふたりで\n[00:54.00]",
+      "romalrc": "[00:04.00]shizuka na eki de shihatsu o matteru\n[00:09.50]shiroi iki ga yukkuri sora ni toketa\n[00:15.00]mada namae no nai asa no hikari\n[00:20.50]kimi ni todoku made aruite ikou\n[00:31.00]tooi machi no akari ga kiete iku\n[00:36.50]senro zoi ni saita chiisana hana\n[00:42.00]kyou dake wa yukkuri susumou\n[00:47.50]yoake no sanpo futari de"
+    },
+    {
+      "id": "demoEn01",
+      "title": "Folded Signals",
+      "artists": [
+        "Sample Band",
+        "Demo Voice"
+      ],
+      "album": "Demo Sessions",
+      "duration_ms": 60000,
+      "cover": "cover_signal.jpg",
+      "lrc": "[00:03.50]Counting paper satellites\n[00:08.50]Folded from the evening news\n[00:13.50]I throw them past the city lights\n[00:18.50]Hoping one of them gets through\n[00:24.00]\n[00:29.00]Every signal finds a way\n[00:34.00]Every echo finds a room\n[00:39.00]Keep a window open wide\n[00:44.00]I'll be landing somewhere soon\n[00:50.00]"
+    },
+    {
+      "id": "demoIn01",
+      "title": "Ember Room (Instrumental)",
+      "artists": [
+        "Sample Band"
+      ],
+      "album": "Demo Sessions",
+      "duration_ms": 30000,
+      "cover": "cover_ember.jpg"
+    }
+  ]
+}
