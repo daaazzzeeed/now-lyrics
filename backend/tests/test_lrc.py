@@ -1,12 +1,14 @@
 """Юнит-тесты: парсер LRC, фильтр титров, склейка ромадзи, выбор кандидатов, clean_title, палитра."""
+import asyncio
 import json
 import subprocess
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
-from lyrics_tv import lrc
+from lyrics_tv import lrc, sources
 
 BACKEND = Path(__file__).resolve().parent.parent
 
@@ -111,3 +113,64 @@ def test_palette_worker(tmp_path):
     assert set(pal) == {"bg", "card", "glow"}
     r, g, b = (int(pal["card"][i:i + 2], 16) for i in (1, 3, 5))
     assert r > g and r > b  # оттенок взят у красного, а не у чёрного
+
+
+def test_syllabic_romaji():
+    assert lrc.is_syllabic("to tsu ze n no ki su ya a tsu i ma na za shi de")
+    assert not lrc.is_syllabic("totsuzen no kisu ya atsui manazashi de")
+    assert not lrc.is_syllabic("kimi no na wa")
+    assert lrc.needs_romaji({"text": "突然のキスや", "romaji": "to tsu ze n no ki su ya"})
+    assert not lrc.needs_romaji({"text": "突然のキスや", "romaji": "totsuzen no kisu ya"})
+    assert not lrc.needs_romaji({"text": "hello", "romaji": None})
+
+
+LRCLIB_HIT = {"syncedLyrics": "[00:30.49]突然のキスや\n[00:39.91]恋のプログラムを\n", "plainLyrics": "x"}
+
+
+def run_find(netease_handler):
+    """find_lyrics против подделки: LRCLIB находит японский текст, NetEase отвечает как скажут."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/get":
+            return httpx.Response(200, json=LRCLIB_HIT)
+        if req.url.path == "/api/search":
+            return httpx.Response(200, json=[])
+        return netease_handler(req)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            info = {"title": "Plastic Love", "artists": ["Mariya Takeuchi"], "album": "Expressions",
+                    "duration_ms": 294000}
+            return await sources.find_lyrics(client, info)
+    return asyncio.run(go())
+
+
+def test_netease_encrypted_search_keeps_lrclib():
+    lyr, ok = run_find(lambda req: httpx.Response(200, json={"result": "35b1748964af8a7c", "code": 200}))
+    assert lyr and lyr["source"] == "lrclib" and lyr["lines"][0]["text"] == "突然のキスや"
+    assert ok
+
+
+def test_netease_garbage_lyric_keeps_lrclib():
+    def ne(req):
+        if "search" in req.url.path:
+            return httpx.Response(200, json={"result": {"songs": [
+                {"id": 7, "name": "Plastic Love", "ar": [{"name": "竹内まりや"}], "dt": 294500}]}})
+        return httpx.Response(200, json={"lrc": "неожиданно строка"})  # .get у строки — исключение
+    lyr, ok = run_find(ne)
+    assert lyr and lyr["source"] == "lrclib"
+
+
+def test_netease_cloudsearch_with_romalrc_wins():
+    def ne(req):
+        if req.url.path == "/api/cloudsearch/pc":
+            return httpx.Response(200, json={"result": {"songs": [
+                {"id": 7, "name": "Plastic Love (New-Remix)", "ar": [{"name": "竹内まりや"}], "dt": 295520}]}})
+        if req.url.path == "/api/song/lyric":
+            return httpx.Response(200, json={
+                "lrc": {"lyric": "[00:00.00] 作词 : 竹内まりや\n[00:30.71]突然のキスや\n"},
+                "romalrc": {"lyric": "[00:30.710]to tsu ze n no ki su ya\n"}})
+        return httpx.Response(404)
+    lyr, ok = run_find(ne)
+    assert lyr["source"] == "netease"
+    assert lyr["lines"] == [{"t": 30710, "text": "突然のキスや", "romaji": "to tsu ze n no ki su ya"}]
+    assert lrc.needs_romaji(lyr["lines"][0])  # слоговый — уйдёт в Gemini

@@ -12,6 +12,7 @@ from .lrc import (CJK_ANY, attach, clean_title, has_romaji, is_japanese, lyrics_
 log = logging.getLogger("sources")
 
 NE_HEADERS = {"Referer": "https://music.163.com/", "User-Agent": C.BROWSER_UA}
+NE_SEARCH = ("/api/cloudsearch/pc", "/api/search/get", "/api/search/get/web")
 
 
 class SourceDown(Exception):
@@ -53,9 +54,15 @@ async def lrclib_lookup(client: httpx.AsyncClient, title: str, artist: str, albu
 async def netease_lookup(client: httpx.AsyncClient, title: str, artists: list[str], dur_ms: int) -> dict | None:
     """Неофициальный API NetEase: большая база азиатской музыки, часто с готовым romalrc."""
     query = f"{clean_title(title)} {artists[0] if artists else ''}".strip()
-    js = _json(await client.post(f"{C.NETEASE_BASE}/api/search/get/web",
-                                 data={"s": query, "type": 1, "offset": 0, "limit": 10}, headers=NE_HEADERS))
-    songs = ((js or {}).get("result") or {}).get("songs") or [] if isinstance(js, dict) else []
+    songs: list = []
+    # search/get/web с 2026 года отдаёт result зашифрованной строкой — сначала cloudsearch, старые как запасные
+    for path in NE_SEARCH:
+        js = _json(await client.post(f"{C.NETEASE_BASE}{path}",
+                                     data={"s": query, "type": 1, "offset": 0, "limit": 10}, headers=NE_HEADERS))
+        result = js.get("result") if isinstance(js, dict) else None
+        if isinstance(result, dict) and isinstance(result.get("songs"), list):
+            songs = result["songs"]
+            break
     best = pick_netease(songs, title, artists, dur_ms)
     if not best:
         return None
@@ -77,10 +84,15 @@ async def find_lyrics(client: httpx.AsyncClient, info: dict) -> tuple[dict | Non
     title, artists, dur = info["title"], info["artists"], info["duration_ms"]
     ok = True
     lyr = None
+    # Любой сбой источника (сеть, 5xx, неожиданный формат ответа) — «не найдено» не кэшируем,
+    # но и найденное в другом источнике не теряем.
     try:
         lyr = await lrclib_lookup(client, title, artists[0] if artists else "", info["album"], dur)
     except (httpx.HTTPError, SourceDown) as e:
         log.info("LRCLIB недоступен: %s", e)
+        ok = False
+    except Exception:  # noqa: BLE001
+        log.exception("LRCLIB: неожиданный ответ")
         ok = False
     asian = bool(CJK_ANY.search(title + " " + " ".join(artists))) or is_japanese(lyr)
     if lyr is None or asian or not lyr["synced"]:
@@ -89,6 +101,9 @@ async def find_lyrics(client: httpx.AsyncClient, info: dict) -> tuple[dict | Non
             ne = await netease_lookup(client, title, artists, dur)
         except (httpx.HTTPError, SourceDown) as e:
             log.info("NetEase недоступен: %s", e)
+            ok = False
+        except Exception:  # noqa: BLE001
+            log.exception("NetEase: неожиданный ответ")
             ok = False
         if ne and (lyr is None
                    or (not lyr["synced"] and ne["synced"])
