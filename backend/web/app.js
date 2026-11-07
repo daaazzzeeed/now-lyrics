@@ -5,6 +5,7 @@
   var qs = new URLSearchParams(location.search);
   var KEY = qs.get('key') || '';
   var EXTRA_OFFSET = parseInt(qs.get('offset') || '0', 10) || 0;   // ?offset=300 — подстроить на конкретном экране
+  var SHOW_TR = qs.get('tr') !== '0';                               // ?tr=0 — без перевода
   var ANCHOR = 0.3;                                                  // активная строка — на трети высоты карточки
 
   var $ = function (id) { return document.getElementById(id); };
@@ -140,21 +141,29 @@
   if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', fitTitle);
 
   // ── текст ──
-  function setSub(d, text) {
-    var r = d.querySelector('.r');
-    if (!text) { if (r) d.removeChild(r); return; }
-    if (!r) { r = document.createElement('div'); r.className = 'r'; d.appendChild(r); }
-    if (r.textContent !== text) r.textContent = text;
+  // под строкой: .r — транслитерация, .tl — перевод (всегда после .r)
+  function setPart(d, cls, text) {
+    var el = d.querySelector('.' + cls);
+    if (!text) { if (el) d.removeChild(el); return; }
+    if (!el) {
+      el = document.createElement('div'); el.className = cls;
+      var tl = cls === 'r' ? d.querySelector('.tl') : null;
+      if (tl) d.insertBefore(el, tl); else d.appendChild(el);
+    }
+    if (el.textContent !== text) el.textContent = text;
   }
+  function subOf(ln) { return ln.translit || ln.romaji || ln.sub || ''; }
+  function tlOf(ln) { return SHOW_TR ? (ln.translation || '') : ''; }
 
-  function patchRomaji() {
+  function patchRomaji() {   // транслитерация и перевод приходят позже текста — дописываем на месте
     var L = S.lyrics, changed = false;
     if (!L || !L.lines) return;
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i], ln = row.idx >= 0 ? L.lines[row.idx] : null;
       if (row.note || !ln) continue;
-      var want = ln.translit || ln.romaji || ln.sub || '';
-      if (want !== row.sub) { setSub(row.el, want); row.sub = want; changed = true; }
+      var sub = subOf(ln), tl = tlOf(ln);
+      if (sub !== row.sub) { setPart(row.el, 'r', sub); row.sub = sub; changed = true; }
+      if (tl !== row.tl) { setPart(row.el, 'tl', tl); row.tl = tl; changed = true; }
     }
     if (changed) { activeIdx = -2; lastY = -1; }   // высота строк изменилась — пересчитать прокрутку
   }
@@ -184,7 +193,7 @@
     if (synced && src[0].ln.t > 2500) src.unshift({ ln: { t: 0, text: '' }, idx: -1 });   // вступление — ♪
     var frag = document.createDocumentFragment();
     src.forEach(function (item) {
-      var ln = item.ln, sub = ln.translit || ln.romaji || ln.sub || '';
+      var ln = item.ln, sub = subOf(ln), tl = tlOf(ln);
       var d = document.createElement('div');
       if (!synced && !ln.text) { d.className = 'gap'; frag.appendChild(d); return; }
       d.className = 'line';
@@ -197,10 +206,11 @@
         o.className = 'o';
         o.textContent = ln.text;
         d.appendChild(o);
-        setSub(d, sub);
+        setPart(d, 'r', sub);
+        setPart(d, 'tl', tl);
       }
       frag.appendChild(d);
-      rows.push({ t: ln.t || 0, el: d, note: note, idx: item.idx, sub: sub });
+      rows.push({ t: ln.t || 0, el: d, note: note, idx: item.idx, sub: sub, tl: tl });
     });
     el.lines.appendChild(frag);
     if (!synced) { el.lines.classList.add('plain'); el.hint.textContent = 'без таймингов'; }

@@ -76,6 +76,7 @@ class Fake(BaseHTTPRequestHandler):
     calls: dict = {}
     lrclib_names: list = []
     gemini_calls: list = []   # (язык, строки, подсказки)
+    translate_calls: list = []  # (sl, tl, строки)
     img = b""
     font = b""
     base = ""
@@ -116,6 +117,13 @@ class Fake(BaseHTTPRequestHandler):
             return self._reply(200, {"result": {"songs": [
                 {"id": 1, "name": "別の歌", "artists": [{"name": "誰か"}], "duration": 201000},
                 {"id": 42, "name": "テストの歌", "ar": [{"name": "テスト"}], "dt": 202000}]}})
+        if path == "/translate_a/single":  # Google Translate: строки через \n, язык источника в [2]
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            text = urllib.parse.parse_qs(raw.decode())["q"][0]
+            Fake.translate_calls.append((q["sl"][0], q["tl"][0], text.split("\n")))
+            detected = "en" if q["sl"][0] == "auto" and text.isascii() else q["sl"][0]
+            out = "\n".join(f"ru:{ln}" for ln in text.split("\n"))
+            return self._reply(200, [[[out, text, None, None]], None, detected])
         if path.startswith("/v1beta/models/") and path.endswith(":generateContent"):
             assert self.headers.get("x-goog-api-key") == "gkey"
             body = json.loads(raw)
@@ -192,7 +200,8 @@ def srv(tmp_path_factory):
                SPOTIFY_CLIENT_ID="cid", SPOTIFY_CLIENT_SECRET="secret", GEMINI_API_KEY="gkey",
                GEMINI_MODEL="fake-model", IDLE_AFTER_S="3", LOG_LEVEL="WARNING",
                SPOTIFY_ACCOUNTS_BASE=Fake.base, SPOTIFY_API_BASE=Fake.base + "/v1", LRCLIB_BASE=Fake.base,
-               NETEASE_BASE=Fake.base, GEMINI_BASE=Fake.base, FONT_BASE=Fake.base + "/fonts")
+               NETEASE_BASE=Fake.base, GEMINI_BASE=Fake.base, FONT_BASE=Fake.base + "/fonts",
+               GOOGLE_TRANSLATE_BASE=Fake.base, TRANSLATE_TO="ru", DEEPL_API_KEY="")
     proc = subprocess.Popen([sys.executable, "-m", "lyrics_tv"], cwd=BACKEND, env=env)
     url = f"http://127.0.0.1:{port}"
     for _ in range(100):
@@ -327,6 +336,8 @@ def test_netease_fallback_romalrc_and_gemini(srv):
     # строка 1 — нормальный romalrc, строка 2 — слоговый romalrc + деление на слова от cutlet, строка 4 — cutlet
     assert translits(m) == ["tesuto no ichigyoume desu", "ni gyoume wa koko", None, "san gyoume no uta"]
     assert not Fake.gemini_calls                                   # без LLM
+    m = m if m["lyrics"]["lines"][0].get("translation") else None
+    assert m is None or m["lyrics"]["lines"][0]["translation"] == "ru:テストの一行目です"
     assert m["offset"] == 250 and m["auth_days"] is not None and m["auth_days"] <= 10
 
     r = httpx.get(srv["url"] + "/cover/track42.jpg?key=k")
@@ -471,6 +482,26 @@ def test_next_track_is_prepared_from_queue(srv):
         play("track42")
 
 
+def test_translation_for_non_english_only(srv):
+    play("trackKO")
+    ev = Events(srv["url"])
+    try:
+        m = ev.wait(lambda m: state(track="trackKO", lyrics_state="ready")(m)
+                    and (m["lyrics"]["lines"][0].get("translation")), timeout=20)
+        assert [ln.get("translation") for ln in m["lyrics"]["lines"]] == \
+            ["ru:서울의 밤", "ru:I love the city", "ru:너와 함께"]
+        assert ("ko", "ru", ["서울의 밤", "I love the city", "너와 함께"]) in Fake.translate_calls
+        play("trackEN")
+        m = ev.wait(state(track="trackEN", lyrics_state="ready"))
+        later = ev.drain(3)
+        for x in [m] + later:
+            if x.get("t") == "state" and (x.get("track") or {}).get("id") == "trackEN" and x.get("lyrics"):
+                assert not any(ln.get("translation") for ln in x["lyrics"]["lines"])   # английский — без перевода
+    finally:
+        ev.close()
+        play("track42")
+
+
 # ── статусы, опрос, память, авторизация ──
 
 def test_pause_becomes_idle(srv):
@@ -526,3 +557,4 @@ def test_invalid_grant_goes_to_auth(srv):
         Fake.flags.clear()
         ev.close()
     assert not (srv["data"] / "spotify_token.json").exists()
+

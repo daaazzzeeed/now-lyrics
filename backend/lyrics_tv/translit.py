@@ -49,15 +49,13 @@ def _short_error(r: httpx.Response) -> str:
         return r.text[:160]
 
 
-async def gemini(client: httpx.AsyncClient, lang: str, texts: list[str],
-                 hints: list[str | None] | None = None) -> list[str]:
-    """Один запрос; модели из GEMINI_MODEL по очереди (404/429/5xx/таймаут → следующая)."""
+async def gemini_text(client: httpx.AsyncClient, system: str, items: list) -> list[str]:
+    """Один запрос к Gemini: JSON-массив на входе, массив строк той же длины на выходе.
+    Модели из GEMINI_MODEL по очереди (404/429/5xx/таймаут → следующая)."""
     if not C.GEMINI_API_KEY:
         raise TranslitFailed("GEMINI_API_KEY не задан")
-    hints = hints or [None] * len(texts)
-    items = [{"text": t, **({"hint": h} if h else {})} for t, h in zip(texts, hints)]
     body = {
-        "systemInstruction": {"parts": [{"text": SYSTEMS[lang] + " " + COMMON}]},
+        "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": json.dumps(items, ensure_ascii=False)}]}],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json",
                              "responseSchema": {"type": "ARRAY", "items": {"type": "STRING"}}},
@@ -82,13 +80,21 @@ async def gemini(client: httpx.AsyncClient, lang: str, texts: list[str],
         except (KeyError, IndexError, TypeError, ValueError) as e:
             errors.append(f"{model}: непонятный ответ {e!r}")
             continue
-        if not isinstance(out, list) or len(out) != len(texts):
-            errors.append(f"{model}: длина ответа {len(out) if isinstance(out, list) else '?'} ≠ {len(texts)}")
+        if not isinstance(out, list) or len(out) != len(items):
+            errors.append(f"{model}: длина ответа {len(out) if isinstance(out, list) else '?'} ≠ {len(items)}")
             continue
         if model != models[0]:
             log.info("Gemini: ответила запасная модель %s", model)
-        return [s.strip().lower() if isinstance(s, str) else "" for s in out]
+        return [s.strip() if isinstance(s, str) else "" for s in out]
     raise TranslitFailed("; ".join(errors))
+
+
+async def gemini(client: httpx.AsyncClient, lang: str, texts: list[str],
+                 hints: list[str | None] | None = None) -> list[str]:
+    """Транслитерация через Gemini (запасной вариант)."""
+    hints = hints or [None] * len(texts)
+    items = [{"text": t, **({"hint": h} if h else {})} for t, h in zip(texts, hints)]
+    return [s.lower() for s in await gemini_text(client, SYSTEMS[lang] + " " + COMMON, items)]
 
 
 WORKER_TIMEOUT_S = 60

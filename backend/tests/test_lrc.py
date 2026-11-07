@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from lyrics_tv import config as C
-from lyrics_tv import fonts, lrc, sources, translit
+from lyrics_tv import fonts, lrc, sources, translate, translit
 from lyrics_tv.cache import Cache
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -476,3 +476,78 @@ def test_netease_yrc_wins_over_lrclib_line_timing():
     lyr = res["lyrics"]
     assert lyr["source"] == "netease" and lyr["timing"] == "word" and res["meta"]["timing"] == "word"
     assert lyr["lines"][0] == {"t": 10740, "e": 13050, "text": "One more night"}
+
+
+# ── перевод ──
+
+def test_looks_english():
+    assert translate.looks_english(["I brought flowers to your door last night", "I done you wrong"])
+    assert not translate.looks_english(["Te quiero mucho", "Bésame mucho"])
+    assert not translate.looks_english(["사랑해", "I love you"])
+
+
+def translate_with(handler, lyr, lang, monkeypatch, **cfg):
+    for k, v in {"TRANSLATE_TO": "ru", "DEEPL_API_KEY": "", "GEMINI_API_KEY": "", **cfg}.items():
+        monkeypatch.setattr(C, k, v)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await translate.fill_translation(client, lyr, lang)
+    return run(go())
+
+
+def google_ok(calls, detected=None):
+    def handler(req):
+        if req.url.path != "/translate_a/single":
+            return httpx.Response(404)
+        q = dict(req.url.params)
+        text = dict(x.split("=", 1) for x in req.content.decode().split("&"))["q"]
+        import urllib.parse
+        text = urllib.parse.unquote_plus(text)
+        calls.append((q["sl"], text.split("\n")))
+        out = "\n".join("ru:" + ln for ln in text.split("\n"))
+        return httpx.Response(200, json=[[[out, text]], None, detected or q["sl"]])
+    return handler
+
+
+def test_translation_chorus_once_and_source_lang(monkeypatch):
+    calls = []
+    lyr = {"lines": [{"t": 0, "text": "我想你"}, {"t": 1, "text": ""}, {"t": 2, "text": "我想你"}, {"t": 3, "text": "月亮"}]}
+    assert translate_with(google_ok(calls), lyr, "zh", monkeypatch)
+    assert calls == [("zh-CN", ["我想你", "月亮"])]                  # повтор припева — один раз
+    assert [ln.get("translation") for ln in lyr["lines"]] == ["ru:我想你", None, "ru:我想你", "ru:月亮"]
+    assert lyr["translation_to"] == "ru"
+
+
+def test_translation_skips_english_detected(monkeypatch):
+    calls = []
+    lyr = {"lines": [{"t": 0, "text": "Walkin' down the dusty road"}]}
+    assert translate_with(google_ok(calls, detected="en"), lyr, None, monkeypatch)
+    assert "translation" not in lyr["lines"][0] and lyr["translation_skip"] == "en"
+
+
+def test_translation_deepl_when_key(monkeypatch):
+    seen = []
+
+    def handler(req):
+        seen.append(req.url.path)
+        assert req.headers["Authorization"] == "DeepL-Auth-Key dk"
+        texts = [v for k, v in httpx.QueryParams(req.content.decode()).multi_items() if k == "text"]
+        return httpx.Response(200, json={"translations": [{"text": "ru:" + t, "detected_source_language": "KO"}
+                                                          for t in texts]})
+    lyr = {"lines": [{"t": 0, "text": "사랑해"}]}
+    assert translate_with(handler, lyr, "ko", monkeypatch, DEEPL_API_KEY="dk")
+    assert seen == ["/v2/translate"] and lyr["lines"][0]["translation"] == "ru:사랑해"
+
+
+def test_translation_gemini_only_when_google_fails(monkeypatch):
+    seen = []
+
+    def handler(req):
+        seen.append(req.url.path.split(":")[0].split("/")[-1])
+        if req.url.path == "/translate_a/single":
+            return httpx.Response(429)
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": '["я скучаю"]'}]}}]})
+    lyr = {"lines": [{"t": 0, "text": "我想你"}]}
+    assert translate_with(handler, lyr, "zh", monkeypatch, GEMINI_API_KEY="k")
+    assert seen[0] == "single" and lyr["lines"][0]["translation"] == "я скучаю"

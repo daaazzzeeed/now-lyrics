@@ -23,6 +23,7 @@ from .lrc import LANGS, adjust, detect_lang, han_lang, has_translit, lyrics_lang
 from .media import DEFAULT_PALETTE, compute_palette, ensure_cover, fallback_palette, palette_fresh
 from .sources import find_lyrics, lrclib_stage, netease_stage
 from .spotify import AuthRequired, RateLimited, Spotify, parse_item
+from .translate import fill_translation, needs_translation
 from .translit import fill
 
 log = logging.getLogger("hub")
@@ -252,7 +253,7 @@ class Hub:
         log.info("смена трека gen=%d %s: %s — %s; кэш: текст %s, палитра %s%s", gen, tid, ", ".join(info["artists"]),
                  info["title"], "да" if self.raw else ("—" if fetch else "«нет»"), "да" if fresh_pal else "—",
                  "; готовится заранее" if prefetching else "")
-        if fetch or translit or prefetching:
+        if fetch or translit or prefetching or needs_translation(self.raw):
             self.pipeline = self._spawn(self._pipeline(info, gen, fetch, translit))
         if not fresh_pal:
             self._spawn(self._palette(info, gen))
@@ -318,37 +319,57 @@ class Hub:
             translit = self._translit_pending(
                 cached.get("lyrics"), self._lang_for(info, cached.get("lyrics"), override))
 
-        known: dict[str, str] = {}
         if fetch:
             raw = await self._find(info, gen, tag, override)
-        elif translit:
+        elif translit or needs_translation((self.cache.get(tid) or {}).get("lyrics")):
             raw = (self.cache.get(tid) or {}).get("lyrics")
         else:
             return
+        if not raw:
+            return
         if not self._translit_pending(raw):
-            if raw:
-                self.cache.update(tid, translit_done=True)
+            self.cache.update(tid, translit_done=True)
+        # транслитерация и перевод независимы — параллельно, каждый досылает своё на экран
+        await asyncio.gather(self._translit_stage(info, gen, tag, raw, override),
+                             self._translation_stage(info, gen, tag, raw, override))
+
+    def _progress(self, tid: str, gen: int | None, raw: dict) -> None:
+        self.cache.update(tid, lyrics=raw)
+        if self._live(tid, gen):
+            self.raw = raw
+            self._present()
+            self.push_state()
+
+    async def _translit_stage(self, info: dict, gen: int | None, tag: str, raw: dict, override: dict) -> None:
+        tid = info["id"]
+        if not self._translit_pending(raw):
             return
         han = han_lang(raw, override.get("lang"))
-
-        def progress() -> None:
-            self.cache.update(tid, lyrics=raw)
-            if live():
-                self.raw = raw
-                self._present()
-                self.push_state()
-
+        known: dict[str, str] = {}
         t0 = time.monotonic()
         for pause in (TRANSLIT_RETRY_S if gen is not None else (0,)):
             if pause:
                 await asyncio.sleep(pause)
-                if not live():
+                if not self._live(tid, gen):
                     return
-            if await fill(self.client, raw, han, known, progress):
+            if await fill(self.client, raw, han, known, lambda: self._progress(tid, gen, raw)):
                 self.cache.update(tid, lyrics=raw, translit_done=True)
                 log.info("%s: транслитерация (%s) готова за %d мс", tag, han, (time.monotonic() - t0) * 1000)
                 return
         log.info("%s: транслитерация не удалась — повтор при следующем появлении трека", tag)
+
+    async def _translation_stage(self, info: dict, gen: int | None, tag: str, raw: dict, override: dict) -> None:
+        if not needs_translation(raw):
+            return
+        lang = override.get("lang") if override.get("lang") in LANGS else lyrics_lang(raw)
+        t0 = time.monotonic()
+        if await fill_translation(self.client, raw, lang):
+            self._progress(info["id"], gen, raw)
+            log.info("%s: перевод (%s → %s) %s за %d мс", tag, lang or "авто", C.TRANSLATE_TO,
+                     f"не нужен ({raw.get('translation_skip')})" if raw.get("translation_skip") else "готов",
+                     (time.monotonic() - t0) * 1000)
+        else:
+            log.info("%s: перевод не удался — повтор при следующем появлении трека", tag)
 
     async def _find(self, info: dict, gen: int | None, tag: str, override: dict) -> dict | None:
         tid = info["id"]
@@ -407,7 +428,7 @@ class Hub:
         lang = self._lang_for(nxt, cached.get("lyrics"), self.cache.override(nxt["id"], nxt["artists"]))
         translit = self._translit_pending(cached.get("lyrics"), lang)
         pal = not palette_fresh(cached.get("palette"))
-        if not (fetch or translit or pal):
+        if not (fetch or translit or pal or needs_translation(cached.get("lyrics"))):
             return
         log.info("готовлю заранее следующий трек %s: %s — %s", nxt["id"], ", ".join(nxt["artists"]), nxt["title"])
 
