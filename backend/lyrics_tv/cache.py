@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .lrc import migrate
 
-VERSION = 1
+VERSION = 2  # 2: NetEase yrc, локальная транслитерация, перевод — старые записи ищутся заново
 OVERRIDE_FIELDS = ("offset_ms", "source", "source_id", "lang")
 
 
