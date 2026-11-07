@@ -1,12 +1,14 @@
-"""Перевод строк неанглийских песен (по умолчанию на русский).
+"""Перевод строк песен (по умолчанию на русский).
 
 Провайдеры по очереди: DeepL (если задан DEEPL_API_KEY) → Google Translate (бесплатный эндпоинт без ключа)
 → Gemini (только если оба не смогли). Перевод кэшируется вместе с текстом.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 
 import httpx
 
@@ -16,10 +18,10 @@ from .translit import TranslitFailed, gemini_text
 
 log = logging.getLogger("translate")
 
-CHUNK = 25
-EN_WORDS = set("the a an and or but i you he she it we they me my your our is are was were be been am do does did "
-               "not no so to of in on at for with from up down out all can can't don't i'm it's just know love "
-               "baby oh yeah like get got go gonna wanna one more night time when what that this there".split())
+CHUNK_CHARS = 3500   # одним куском — чтобы переводчик видел контекст песни («baby» → «детка»)
+MIN_GAP_S = 1.5     # бесплатный Google отвечает 429, если спрашивать часто
+_gate = asyncio.Lock()
+_last = [0.0]
 # язык трека → код Google / DeepL
 GOOGLE_SRC = {"ja": "ja", "ko": "ko", "zh": "zh-CN", "zh-tw": "zh-TW", "yue": "yue"}
 DEEPL_SRC = {"ja": "JA", "ko": "KO", "zh": "ZH", "zh-tw": "ZH", "yue": "ZH"}
@@ -27,14 +29,6 @@ DEEPL_SRC = {"ja": "JA", "ko": "KO", "zh": "ZH", "zh-tw": "ZH", "yue": "ZH"}
 
 class TranslateFailed(Exception):
     pass
-
-
-def looks_english(texts: list[str]) -> bool:
-    """Латиница и много частых английских слов — перевод не нужен."""
-    words = re.findall(r"[a-z']+", " ".join(texts).lower())
-    if not words or CJK_ANY.search("".join(texts)) or re.search(r"[а-яё]", "".join(texts), re.I):
-        return False
-    return sum(1 for w in words if w in EN_WORDS) / len(words) >= 0.18
 
 
 def source_lang(lang: str | None, texts: list[str]) -> str | None:
@@ -58,11 +52,24 @@ async def _deepl(client: httpx.AsyncClient, src: str | None, texts: list[str]) -
     return [x.get("text", "") for x in tr], detected
 
 
-async def _google(client: httpx.AsyncClient, src: str | None, texts: list[str]) -> tuple[list[str], str | None]:
-    """Неофициальный бесплатный эндпоинт: строки через \\n одним запросом, порядок сохраняется."""
+async def _paced(coro_fn):
+    """Запросы к бесплатному Google по одному и не чаще раза в MIN_GAP_S."""
+    async with _gate:
+        wait = _last[0] + MIN_GAP_S - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        try:
+            return await coro_fn()
+        finally:
+            _last[0] = time.monotonic()
+
+
+async def _google_gtx(client: httpx.AsyncClient, src: str | None, texts: list[str]) -> tuple[list[str], str | None]:
+    """Строки через \n одним запросом: переводчик видит контекст, порядок сохраняется."""
     params = [("client", "gtx"), ("sl", GOOGLE_SRC.get(src or "", "auto")), ("tl", C.TRANSLATE_TO), ("dt", "t")]
-    r = await client.post(f"{C.GOOGLE_TRANSLATE_BASE}/translate_a/single", params=params,
-                          data={"q": "\n".join(texts)}, timeout=15, headers={"User-Agent": C.BROWSER_UA})
+    r = await _paced(lambda: client.post(f"{C.GOOGLE_TRANSLATE_BASE}/translate_a/single", params=params,
+                                         data={"q": "\n".join(texts)}, timeout=15,
+                                         headers={"User-Agent": C.BROWSER_UA}))
     if r.status_code != 200:
         raise TranslateFailed(f"Google: HTTP {r.status_code}")
     try:
@@ -74,7 +81,44 @@ async def _google(client: httpx.AsyncClient, src: str | None, texts: list[str]) 
     out = joined.split("\n")
     if len(out) != len(texts):
         raise TranslateFailed(f"Google: {len(out)} строк вместо {len(texts)}")
-    return [s.strip() for s in out], detected
+    return [x.strip() for x in out], detected
+
+
+async def _google_dict(client: httpx.AsyncClient, src: str | None, texts: list[str]) -> tuple[list[str], str | None]:
+    """Запасной бесплатный эндпоинт: каждая строка отдельно (контекста меньше, но свой лимит запросов)."""
+    out: list[str] = []
+    detected = None
+    for k in range(0, len(texts), 40):
+        part = texts[k:k + 40]
+        params = [("client", "dict-chrome-ex"), ("sl", GOOGLE_SRC.get(src or "", "auto")),
+                  ("tl", C.TRANSLATE_TO)] + [("q", t) for t in part]
+        r = await _paced(lambda: client.get(f"{C.GOOGLE_DICT_BASE}/translate_a/t", params=params, timeout=15,
+                                            headers={"User-Agent": C.BROWSER_UA}))
+        if r.status_code != 200:
+            raise TranslateFailed(f"Google dict: HTTP {r.status_code}")
+        try:
+            js = r.json()
+        except ValueError as e:
+            raise TranslateFailed("Google dict: не JSON") from e
+        items = [x[0] if isinstance(x, list) else x for x in (js if isinstance(js, list) else [])]
+        if len(items) != len(part):
+            raise TranslateFailed(f"Google dict: {len(items)} строк вместо {len(part)}")
+        if detected is None and js and isinstance(js[0], list) and len(js[0]) > 1:
+            detected = js[0][1]
+        out += [str(x).strip() for x in items]
+    return out, detected
+
+
+async def _google(client: httpx.AsyncClient, src: str | None, texts: list[str]) -> tuple[list[str], str | None]:
+    errors = []
+    for attempt, fn in enumerate((_google_gtx, _google_gtx, _google_dict)):
+        try:
+            return await fn(client, src, texts)
+        except (TranslateFailed, httpx.HTTPError) as e:
+            errors.append(repr(e))
+            if attempt == 0 and "429" in repr(e):
+                await asyncio.sleep(3)
+    raise TranslateFailed("; ".join(errors))
 
 
 async def _gemini(client: httpx.AsyncClient, src: str | None, texts: list[str]) -> tuple[list[str], str | None]:
@@ -86,14 +130,24 @@ async def _gemini(client: httpx.AsyncClient, src: str | None, texts: list[str]) 
         raise TranslateFailed(f"Gemini: {e}") from e
 
 
+def _chunks(texts: list[str]) -> list[list[str]]:
+    out, cur, size = [], [], 0
+    for t in texts:
+        if cur and size + len(t) + 1 > CHUNK_CHARS:
+            out.append(cur)
+            cur, size = [], 0
+        cur.append(t)
+        size += len(t) + 1
+    return out + ([cur] if cur else [])
+
+
 async def translate(client: httpx.AsyncClient, lang: str | None, texts: list[str]) -> tuple[list[str], str | None]:
-    """→ (переводы, определённый язык источника). Кусками по CHUNK строк, провайдеры по очереди."""
+    """→ (переводы, определённый язык источника). Провайдеры по очереди: DeepL → Google → Gemini."""
     src = source_lang(lang, texts)
     providers = ([_deepl] if C.DEEPL_API_KEY else []) + [_google] + ([_gemini] if C.GEMINI_API_KEY else [])
     out: list[str] = []
     detected = None
-    for k in range(0, len(texts), CHUNK):
-        part = texts[k:k + CHUNK]
+    for part in _chunks(texts):
         errors = []
         for fn in providers:
             try:
@@ -111,37 +165,53 @@ async def translate(client: httpx.AsyncClient, lang: str | None, texts: list[str
 def needs_translation(lyr: dict | None) -> bool:
     if not C.TRANSLATE_TO or not lyr:
         return False
-    if lyr.get("translation_to") == C.TRANSLATE_TO:  # уже переведено или решено, что не нужно
-        return False
+    if lyr.get("translation_to") == C.TRANSLATE_TO and lyr.get("translation_skip") != "en":
+        return False  # уже переведено или песня на языке перевода (английские раньше пропускались — теперь нет)
     return any(ln.get("text") for ln in lyr["lines"])
 
 
+def carry_over(old: dict, new: dict) -> dict:
+    """Повторный поиск по новым правилам: тот же источник — оставляем старое (с переводом и транслитерацией),
+    другой — переносим переводы совпадающих строк, чтобы не переводить заново."""
+    if old.get("source") == new.get("source") and old.get("source_id") == new.get("source_id"):
+        return old
+    if old.get("translation_to") == C.TRANSLATE_TO and not old.get("translation_skip"):
+        tr = {ln["text"]: ln["translation"] for ln in old.get("lines", []) if ln.get("translation")}
+        for ln in new["lines"]:
+            if ln.get("text") in tr:
+                ln["translation"] = tr[ln["text"]]
+    return new
+
+
 async def fill_translation(client: httpx.AsyncClient, lyr: dict, lang: str | None) -> bool:
-    """Переводит все строки трека. Английские песни и песни на языке перевода не трогает. True — готово."""
+    """Переводит строки без перевода (песни на языке перевода не трогает). True — готово."""
     lines = lyr["lines"]
     texts = [ln["text"] for ln in lines if ln.get("text")]
     if not texts:
         return True
-    if lang is None and looks_english(texts):
-        lyr["translation_to"] = C.TRANSLATE_TO
-        lyr["translation_skip"] = "en"
+    if C.TRANSLATE_TO == "ru" and sum(1 for t in texts if re.search(r"[а-яё]", t, re.I)) > 0.6 * len(texts):
+        lyr["translation_to"] = C.TRANSLATE_TO          # и так по-русски
+        lyr["translation_skip"] = "ru"
         return True
-    uniq = list(dict.fromkeys(texts))  # повторы припева переводим один раз
+    todo = list(dict.fromkeys(ln["text"] for ln in lines if ln.get("text") and not ln.get("translation")))
+    if not todo:
+        lyr["translation_to"] = C.TRANSLATE_TO
+        return True
     try:
-        res, detected = await translate(client, lang, uniq)
+        res, detected = await translate(client, lang, todo)  # повторы припева — один раз
     except TranslateFailed as e:
         log.warning("перевод: %s", e)
         return False
     det = (detected or "").lower()
-    if det.startswith("en") or det.startswith(C.TRANSLATE_TO.lower()):
+    if det.startswith(C.TRANSLATE_TO.lower()):
         lyr["translation_to"] = C.TRANSLATE_TO
         lyr["translation_skip"] = det
         return True
-    tr = dict(zip(uniq, res))
+    tr = dict(zip(todo, res))
     for ln in lines:
         t = tr.get(ln.get("text", ""))
         if t and t.strip() and t.strip().lower() != ln["text"].strip().lower():
             ln["translation"] = t.strip()
     lyr["translation_to"] = C.TRANSLATE_TO
+    lyr.pop("translation_skip", None)
     return True
-

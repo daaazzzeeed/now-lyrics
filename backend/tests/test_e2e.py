@@ -201,7 +201,7 @@ def srv(tmp_path_factory):
                GEMINI_MODEL="fake-model", IDLE_AFTER_S="3", LOG_LEVEL="WARNING",
                SPOTIFY_ACCOUNTS_BASE=Fake.base, SPOTIFY_API_BASE=Fake.base + "/v1", LRCLIB_BASE=Fake.base,
                NETEASE_BASE=Fake.base, GEMINI_BASE=Fake.base, FONT_BASE=Fake.base + "/fonts",
-               GOOGLE_TRANSLATE_BASE=Fake.base, TRANSLATE_TO="ru", DEEPL_API_KEY="")
+               GOOGLE_TRANSLATE_BASE=Fake.base, GOOGLE_DICT_BASE=Fake.base, TRANSLATE_TO="ru", DEEPL_API_KEY="")
     proc = subprocess.Popen([sys.executable, "-m", "lyrics_tv"], cwd=BACKEND, env=env)
     url = f"http://127.0.0.1:{port}"
     for _ in range(100):
@@ -482,7 +482,7 @@ def test_next_track_is_prepared_from_queue(srv):
         play("track42")
 
 
-def test_translation_for_non_english_only(srv):
+def test_translation_for_all_songs(srv):
     play("trackKO")
     ev = Events(srv["url"])
     try:
@@ -491,12 +491,10 @@ def test_translation_for_non_english_only(srv):
         assert [ln.get("translation") for ln in m["lyrics"]["lines"]] == \
             ["ru:서울의 밤", "ru:I love the city", "ru:너와 함께"]
         assert ("ko", "ru", ["서울의 밤", "I love the city", "너와 함께"]) in Fake.translate_calls
-        play("trackEN")
-        m = ev.wait(state(track="trackEN", lyrics_state="ready"))
-        later = ev.drain(3)
-        for x in [m] + later:
-            if x.get("t") == "state" and (x.get("track") or {}).get("id") == "trackEN" and x.get("lyrics"):
-                assert not any(ln.get("translation") for ln in x["lyrics"]["lines"])   # английский — без перевода
+        play("trackEN")                                                 # английские тоже переводятся
+        m = ev.wait(lambda m: state(track="trackEN", lyrics_state="ready")(m)
+                    and m["lyrics"]["lines"][0].get("translation"), timeout=20)
+        assert m["lyrics"]["lines"][0]["translation"] == "ru:fast words"
     finally:
         ev.close()
         play("track42")

@@ -241,11 +241,19 @@
 
   function updateLines(pos) {
     if (!rows.length) return;
-    if (!synced) {   // текст без таймингов — медленно прокручиваем пропорционально треку
+    if (!synced) {   // текст без таймингов — страницами: страница стоит, пока её можно прочитать
       var dur = S.track ? S.track.duration_ms : 0;
       if (!dur) return;
-      var max = Math.max(0, el.lines.scrollHeight - el.viewport.clientHeight * 0.7);
-      scrollTo(Math.min(1, pos / dur) * max);
+      var pageH = el.viewport.clientHeight * 0.82;
+      var pages = Math.max(1, Math.ceil(el.lines.scrollHeight / pageH));
+      var k = Math.min(1, Math.max(0, (pos / dur - 0.05) / 0.85));   // с 5% до 90% песни
+      var page = Math.min(pages - 1, Math.floor(k * pages));
+      var target = page * pageH, y = 0;
+      for (var i = 0; i < rows.length; i++) {                         // начинаем страницу с целой строки
+        if (rows[i].el.offsetTop > target) break;
+        y = rows[i].el.offsetTop;
+      }
+      scrollTo(page ? y - el.viewport.clientHeight * 0.04 : 0);
       return;
     }
     var idx = findIdx(pos);

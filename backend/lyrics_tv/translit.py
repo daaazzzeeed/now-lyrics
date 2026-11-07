@@ -154,8 +154,8 @@ async def fill(client: httpx.AsyncClient, lyr: dict, han: str, known: dict[str, 
     if not todo:
         return True
     t0 = time.monotonic()
-    hints = [lines[i].get("translit") if lines[i].get("translit") and is_syllabic(lines[i]["translit"]) else None
-             for i in todo]  # слоговый romalrc NetEase — источник певческих чтений
+    hints = [lines[i].get("hint") or (lines[i].get("translit") if is_syllabic(lines[i].get("translit") or "")
+                                      else None) for i in todo]  # слоговый romalrc NetEase — певческие чтения
     out = await run_worker(han, [lines[i]["text"] for i in todo], hints)
     done = 0
     for i, r in zip(todo, out):
@@ -182,7 +182,7 @@ async def fill(client: httpx.AsyncClient, lyr: dict, han: str, known: dict[str, 
         async with sem:
             try:
                 res = await gemini(client, lang, [lines[i]["text"] for i in part],
-                                   [lines[i].get("translit") for i in part])
+                                   [lines[i].get("hint") for i in part])
             except TranslitFailed as e:
                 log.warning("Gemini (%s): %s", lang, e)
                 return False

@@ -18,18 +18,19 @@ from . import config as C
 from .cache import Cache
 from .demo import DemoPlayer
 from .fonts import font_urls
-from .lrc import LANGS, adjust, detect_lang, han_lang, has_translit, lyrics_lang, needs_translit, \
+from .lrc import LANGS, LYRICS_REV, adjust, detect_lang, han_lang, has_translit, lyrics_lang, needs_translit, \
     promote_sub_to_translit
 from .media import DEFAULT_PALETTE, compute_palette, ensure_cover, fallback_palette, palette_fresh
 from .sources import find_lyrics, lrclib_stage, netease_stage
 from .spotify import AuthRequired, RateLimited, Spotify, parse_item
-from .translate import fill_translation, needs_translation
+from .translate import carry_over, fill_translation, needs_translation
 from .translit import fill
 
 log = logging.getLogger("hub")
 
 STALE_S = 20
 TRANSLIT_RETRY_S = (0, 20, 60)   # Gemini бывает перегружен — повторяем, пока трек играет
+TRANSLATE_RETRY_S = (0, 30, 120)
 WATCHDOG_S = 20                  # столько ждём в loading, затем один перезапуск поиска, затем none
 PREFETCH_DELAY_S = 3
 
@@ -246,6 +247,7 @@ class Hub:
         self.raw, self.meta = cached.get("lyrics"), cached.get("meta")
         self.lang = self._lang_for(info, self.raw, self.override)
         fetch = not self.raw and time.time() - cached.get("checked", 0) > C.NEGATIVE_RETRY_S
+        fetch = fetch or (bool(cached.get("stale")) and bool(self.raw))  # старый кэш: показываем и ищем заново
         prefetching = tid in self.inflight
         self.lyrics_state = "ready" if self.raw else ("loading" if fetch or prefetching else "none")
         self._present()
@@ -320,7 +322,7 @@ class Hub:
                 cached.get("lyrics"), self._lang_for(info, cached.get("lyrics"), override))
 
         if fetch:
-            raw = await self._find(info, gen, tag, override)
+            raw = await self._find(info, gen, tag, override, (self.cache.get(tid) or {}).get("lyrics"))
         elif translit or needs_translation((self.cache.get(tid) or {}).get("lyrics")):
             raw = (self.cache.get(tid) or {}).get("lyrics")
         else:
@@ -363,15 +365,21 @@ class Hub:
             return
         lang = override.get("lang") if override.get("lang") in LANGS else lyrics_lang(raw)
         t0 = time.monotonic()
-        if await fill_translation(self.client, raw, lang):
-            self._progress(info["id"], gen, raw)
-            log.info("%s: перевод (%s → %s) %s за %d мс", tag, lang or "авто", C.TRANSLATE_TO,
-                     f"не нужен ({raw.get('translation_skip')})" if raw.get("translation_skip") else "готов",
-                     (time.monotonic() - t0) * 1000)
-        else:
-            log.info("%s: перевод не удался — повтор при следующем появлении трека", tag)
+        for pause in (TRANSLATE_RETRY_S if gen is not None else (0,)):
+            if pause:
+                await asyncio.sleep(pause)  # Google мог временно ограничить (429) — пробуем ещё, пока трек играет
+                if not self._live(info["id"], gen):
+                    return
+            if await fill_translation(self.client, raw, lang):
+                self._progress(info["id"], gen, raw)
+                log.info("%s: перевод (%s → %s) %s за %d мс", tag, lang or "авто", C.TRANSLATE_TO,
+                         f"не нужен ({raw.get('translation_skip')})" if raw.get("translation_skip") else "готов",
+                         (time.monotonic() - t0) * 1000)
+                return
+        log.info("%s: перевод не удался — повтор при следующем появлении трека", tag)
 
-    async def _find(self, info: dict, gen: int | None, tag: str, override: dict) -> dict | None:
+    async def _find(self, info: dict, gen: int | None, tag: str, override: dict, old: dict | None = None
+                    ) -> dict | None:
         tid = info["id"]
         t0 = time.monotonic()
         log.info("%s: поиск текста начат", tag)
@@ -392,6 +400,11 @@ class Hub:
         raw, meta = res["lyrics"], res["meta"]
         if raw:
             promote_sub_to_translit(raw)
+            raw["rev"] = LYRICS_REV
+        if old and not raw:
+            raw, meta = old, (self.cache.get(tid) or {}).get("meta")  # повторный поиск ничего не дал — оставляем
+        elif old and raw:
+            raw = carry_over(old, raw)  # тот же источник — берём старое целиком, иначе переносим перевод
         if raw or res["definitive"]:  # таймауты и 5xx «не найдено» не кэшируют
             self.cache.update(tid, lyrics=raw, meta=meta, checked=time.time(), translit_done=False)
         m = meta or {}

@@ -222,12 +222,12 @@ def test_netease_garbage_lyric_keeps_lrclib():
     assert find_with(lrclib_ok(ne))["lyrics"]["source"] == "lrclib"
 
 
-def test_netease_cloudsearch_with_romalrc_wins():
+def test_netease_with_artist_match_wins_for_asian_and_romalrc_is_only_a_hint():
     def ne(req):
         if req.url.path == "/api/cloudsearch/pc":
             return httpx.Response(200, json={"result": {"songs": [
-                {"id": 7, "name": "Plastic Love (New-Remix)", "ar": [{"name": "竹内まりや"}], "dt": 295520}]}})
-        if req.url.path == "/api/song/lyric":
+                {"id": 7, "name": "Plastic Love (New-Remix)", "ar": [{"name": "Mariya Takeuchi"}], "dt": 295520}]}})
+        if req.url.path == "/api/song/lyric/v1":
             return httpx.Response(200, json={
                 "lrc": {"lyric": "[00:00.00] 作词 : 竹内まりや\n[00:30.71]突然のキスや\n"},
                 "romalrc": {"lyric": "[00:30.710]to tsu ze n no ki su ya\n"}})
@@ -235,8 +235,49 @@ def test_netease_cloudsearch_with_romalrc_wins():
     res = find_with(lrclib_ok(ne))
     lyr = res["lyrics"]
     assert lyr["source"] == "netease" and lyr["source_id"] == "7" and lyr["duration_ms"] == 295520
-    assert lyr["lines"] == [{"t": 30710, "text": "突然のキスや", "translit": "to tsu ze n no ki su ya"}]
+    assert lyr["lines"] == [{"t": 30710, "text": "突然のキスや", "hint": "to tsu ze n no ki su ya"}]
     assert {c["source"] for c in res["candidates"]} == {"lrclib", "netease"}
+
+
+def test_netease_chinese_cover_of_spanish_song_is_rejected():
+    def handler(req):
+        if req.url.path == "/api/get":
+            return httpx.Response(200, json=dict(LRCLIB_HIT, syncedLyrics="[00:10.00]Despacito\n[00:14.00]Quiero respirar\n"))
+        if req.url.path == "/api/search":
+            return httpx.Response(200, json=[])
+        if req.url.path == "/api/cloudsearch/pc":
+            return httpx.Response(200, json={"result": {"songs": [
+                {"id": 532777048, "name": "Despacito", "ar": [{"name": "某歌手"}], "dt": 294000},
+                {"id": 532777049, "name": "Despacito (中文版)", "ar": [{"name": "Luis Fonsi"}], "dt": 294100}]}})
+        if req.url.path == "/api/song/lyric/v1":
+            return httpx.Response(200, json={"lrc": {"lyric": "[00:10.00]你的笑容在我前方\n[00:14.00]我用睫毛\n"},
+                                             "yrc": {"lyric": "[10000,2000](10000,500,0)你的笑容\n[14000,2000](14000,500,0)我用睫毛\n"}})
+        return httpx.Response(404)
+    info = dict(INFO, title="Despacito", artists=["Luis Fonsi", "Daddy Yankee"], album="VIDA")
+    res = find_with(handler, info)
+    assert res["lyrics"]["source"] == "lrclib" and res["lyrics"]["lines"][0]["text"] == "Despacito"
+
+
+def test_inline_translation_after_caret_is_stripped():
+    lines = [{"t": 0, "text": "人民翻身当家做主人^The people rose up"}, {"t": 1, "text": "x^y"}]
+    lrc.strip_inline_translation(lines)
+    assert [ln["text"] for ln in lines] == ["人民翻身当家做主人", "x^y"]
+
+
+def test_syllabic_with_english_words():
+    assert lrc.needs_translit({"text": "Baby love againやさしさだけが",
+                               "translit": "Baby love again ya sa shi sa da ke ga o mo su gi ta da ke na no"})
+    assert not lrc.needs_translit({"text": "Baby love againせめて", "translit": "Baby love again semete"})
+
+
+def test_old_netease_romaji_becomes_hint(tmp_path):
+    cache = Cache(tmp_path / "c.db")
+    cache.db.execute("INSERT INTO track (id, data, updated) VALUES (?, ?, 0)", ("g", json.dumps({
+        "v": 2, "lyrics": {"source": "netease", "synced": True,
+                           "lines": [{"t": 1, "text": "오빠강남스타일", "translit": "o bban gang nam seu ta il"}]}})))
+    data = cache.get("g")
+    assert data["stale"] is True
+    assert data["lyrics"]["lines"][0] == {"t": 1, "text": "오빠강남스타일", "hint": "o bban gang nam seu ta il"}
 
 
 def test_lrclib_picks_nearest_of_two_candidates():
@@ -487,15 +528,10 @@ def test_netease_yrc_wins_over_lrclib_line_timing():
 
 # ── перевод ──
 
-def test_looks_english():
-    assert translate.looks_english(["I brought flowers to your door last night", "I done you wrong"])
-    assert not translate.looks_english(["Te quiero mucho", "Bésame mucho"])
-    assert not translate.looks_english(["사랑해", "I love you"])
-
-
 def translate_with(handler, lyr, lang, monkeypatch, **cfg):
     for k, v in {"TRANSLATE_TO": "ru", "DEEPL_API_KEY": "", "GEMINI_API_KEY": "", **cfg}.items():
         monkeypatch.setattr(C, k, v)
+    monkeypatch.setattr(translate, "MIN_GAP_S", 0)
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -526,11 +562,47 @@ def test_translation_chorus_once_and_source_lang(monkeypatch):
     assert lyr["translation_to"] == "ru"
 
 
-def test_translation_skips_english_detected(monkeypatch):
+def test_english_is_translated_russian_is_not(monkeypatch):
     calls = []
     lyr = {"lines": [{"t": 0, "text": "Walkin' down the dusty road"}]}
     assert translate_with(google_ok(calls, detected="en"), lyr, None, monkeypatch)
-    assert "translation" not in lyr["lines"][0] and lyr["translation_skip"] == "en"
+    assert lyr["lines"][0]["translation"] == "ru:Walkin' down the dusty road"
+    ru = {"lines": [{"t": 0, "text": "Группа крови на рукаве"}, {"t": 1, "text": "Мой порядковый номер"}]}
+    assert translate_with(google_ok(calls), ru, None, monkeypatch) and ru["translation_skip"] == "ru"
+    assert len(calls) == 1
+
+
+def test_translation_carry_over_and_only_missing(monkeypatch):
+    calls = []
+    old = {"source": "netease", "source_id": "1", "translation_to": "ru",
+           "lines": [{"t": 0, "text": "我想你", "translation": "Я скучаю"}]}
+    new = {"source": "lrclib", "source_id": "9", "lines": [{"t": 0, "text": "我想你"}, {"t": 5, "text": "月亮"}]}
+    lyr = translate.carry_over(old, new)
+    assert lyr["lines"][0]["translation"] == "Я скучаю"
+    assert translate_with(google_ok(calls), lyr, "zh", monkeypatch)
+    assert calls == [("zh-CN", ["月亮"])]                       # переводится только недостающее
+    assert translate.carry_over(old, dict(old)) is old           # тот же источник — старое целиком
+
+
+def test_google_429_falls_back_to_dict_endpoint(monkeypatch):
+    monkeypatch.setattr(translate, "MIN_GAP_S", 0)
+    monkeypatch.setattr(translate.asyncio, "sleep", _nosleep)
+    seen = []
+
+    def handler(req):
+        seen.append(req.url.path)
+        if req.url.path == "/translate_a/single":
+            return httpx.Response(429)
+        qs = [v for k, v in req.url.params.multi_items() if k == "q"]
+        return httpx.Response(200, json=[["ru:" + q, "pt"] for q in qs])
+    lyr = {"lines": [{"t": 0, "text": "Aí, Deus"}, {"t": 1, "text": "Samba de janeiro"}]}
+    assert translate_with(handler, lyr, None, monkeypatch)
+    assert seen == ["/translate_a/single", "/translate_a/single", "/translate_a/t"]
+    assert [ln["translation"] for ln in lyr["lines"]] == ["ru:Aí, Deus", "ru:Samba de janeiro"]
+
+
+async def _nosleep(*a, **k):
+    return None
 
 
 def test_translation_deepl_when_key(monkeypatch):

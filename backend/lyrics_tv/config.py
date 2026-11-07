@@ -56,6 +56,7 @@ NETEASE_BASE = env("NETEASE_BASE", "https://music.163.com")
 GEMINI_BASE = env("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 DEEPL_BASE = env("DEEPL_BASE", "https://api-free.deepl.com")
 GOOGLE_TRANSLATE_BASE = env("GOOGLE_TRANSLATE_BASE", "https://translate.googleapis.com")
+GOOGLE_DICT_BASE = env("GOOGLE_DICT_BASE", "https://clients5.google.com")
 # Noto Sans CJK Bold (OFL): {FONT_BASE}/JP/NotoSansJP-Bold.otf и т.д.
 FONT_BASE = env("FONT_BASE", "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/SubsetOTF")
 

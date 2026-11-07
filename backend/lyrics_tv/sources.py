@@ -11,7 +11,8 @@ import httpx
 
 from . import config as C
 from .lrc import (CJK_ANY, add_gaps, attach, clean_title, copy_translit_by_text, has_translit, lyrics_from_lrc,
-                  lyrics_lang, netease_duration, norm, parse_lrc, parse_yrc, pick_lrclib, pick_netease)
+                  lyrics_lang, netease_artist_match, netease_duration, norm, parse_lrc, parse_yrc, pick_lrclib,
+                  pick_netease, strip_inline_translation)
 
 log = logging.getLogger("sources")
 
@@ -62,6 +63,7 @@ def _lrclib_lyrics(hit: dict) -> dict | None:
         return None
     lyr = lyrics_from_lrc(hit.get("syncedLyrics") or "", hit.get("plainLyrics") or "", "lrclib")
     if lyr:
+        strip_inline_translation(lyr["lines"])
         lyr["source_id"] = str(hit.get("id", ""))
         lyr["duration_ms"] = round((hit.get("duration") or 0) * 1000) or None
     return lyr
@@ -128,17 +130,19 @@ async def netease_lyrics(client: httpx.AsyncClient, sid, dur_ms: int | None) -> 
     lyr = lyrics_from_lrc(part("lrc"), "", "netease")
     if not lyr:
         return None
+    # romalrc NetEase почти всегда по слогам — не показываем его, а отдаём библиотекам как подсказку чтений
     roma = parse_lrc(part("romalrc"))[0] if lyr["synced"] and part("romalrc") else []
     if roma:
-        attach(lyr["lines"], roma, "translit")
+        attach(lyr["lines"], roma, "hint")
     words = parse_yrc(part("yrc"))
     if lyr["synced"] and len(words) >= max(2, 0.6 * sum(1 for ln in lyr["lines"] if ln["text"])):
         # таймкоды по словам: строка загорается, когда её начинают петь; в длинных паузах — ♪
         copy_translit_by_text(words, lyr["lines"])
         if roma:
-            attach(words, roma, "translit", tolerance=1500)
+            attach(words, roma, "hint", tolerance=1500)
         lyr["lines"] = add_gaps(words)
         lyr["timing"] = "word"
+    strip_inline_translation(lyr["lines"])
     lyr["source_id"] = str(sid)
     lyr["duration_ms"] = dur_ms or None
     return lyr
@@ -155,9 +159,16 @@ async def netease_stage(client: httpx.AsyncClient, info: dict) -> tuple[dict | N
                    ((s.get("album") or s.get("al") or {}) or {}).get("name", ""), netease_duration(s), True, dur_ms)
              for s in songs]
     best = pick_netease(songs, info["title"], info["artists"], dur_ms, info.get("album") or "")
+    if not best and CJK_ANY.search(info["title"]):
+        # азиатская песня, но нужной версии нет — та же песня у другого исполнителя (берётся, только если
+        # в LRCLIB текста нет или он латиницей, см. find_lyrics)
+        best = pick_netease(songs, info["title"], info["artists"], dur_ms, info.get("album") or "", title_only=True)
     if not best:
         return None, cands
-    return await netease_lyrics(client, best["id"], netease_duration(best)), cands
+    lyr = await netease_lyrics(client, best["id"], netease_duration(best))
+    if lyr:
+        lyr["artist_match"] = netease_artist_match(best, info["artists"])
+    return lyr, cands
 
 
 async def netease_by_id(client: httpx.AsyncClient, sid: str) -> dict | None:
@@ -236,12 +247,27 @@ async def find_lyrics(client: httpx.AsyncClient, info: dict, override: dict | No
         res = on_lrclib(lyr)
         if asyncio.iscoroutine(res):
             await res
-    lang = lyrics_lang(ne)
+    if ne and not ne.get("artist_match", True):
+        # совпало только название: верим, лишь если это та же песня на том же азиатском языке
+        # (Mariya Takeuchi ↔ 竹内まりや), а не китайский кавер «Despacito»
+        same = lyr is not None and lyrics_lang(ne) is not None and lyrics_lang(ne) == lyrics_lang(lyr)
+        cjk = bool(CJK_ANY.search(info["title"] + " ".join(info["artists"])))
+        alone = lyr is None and cjk
+        romanized = lyr is not None and cjk and lyrics_lang(lyr) is None and lyrics_lang(ne) is not None
+        if not (same or alone or romanized):
+            log.info("NetEase %s: другой артист и другой язык — похоже на кавер, не берём", ne.get("source_id"))
+            ne = None
+    cjk_track = bool(CJK_ANY.search(info["title"] + " ".join(info["artists"])))
+    if ne and lyr and lyr["synced"] and lyrics_lang(ne) != lyrics_lang(lyr) and not cjk_track:
+        # текст на другом языке, чем у LRCLIB, а трек не азиатский — это кавер/другая версия («Despacito» по-китайски)
+        log.info("NetEase %s: язык текста не совпадает с LRCLIB — другая версия, не берём", ne.get("source_id"))
+        ne = None
+    asian = lyrics_lang(ne) in ("ja", "ko", "zh", "yue")
     if ne and (lyr is None
                or ne.get("timing") == "word"                      # точнее по времени — берём
                or (not lyr["synced"] and ne["synced"])
-               or (lang in ("ja", "ko", "zh") and has_translit(ne) and not has_translit(lyr))
-               or (is_asian(info, lyr) and ne["synced"] and lyr["synced"] and has_translit(ne))):
+               or (asian and ne["synced"] and ne.get("artist_match"))   # для азиатской музыки NetEase точнее
+               or (asian and cjk_track and lyrics_lang(lyr) is None)):  # в LRCLIB латиницей (пиньинь) — берём оригинал
         lyr = ne
     return {"lyrics": lyr, "definitive": ok or lyr is not None, "candidates": cands,
             "meta": _meta(lyr, info, stages)}

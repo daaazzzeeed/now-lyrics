@@ -33,7 +33,8 @@ def _ja(text: str) -> str:
         _kks = cutlet.Cutlet()
         _kks.use_foreign_spelling = False  # «ビーチ» → «biichi», а не «beach»
     out = _kks.romaji(text).lower()
-    return re.sub(r"(?<![a-z])wo(?![a-z])", "o", out)  # частица を
+    out = re.sub(r"(?<![a-z])wo(?![a-z])", "o", out)  # частица を
+    return re.sub(r"(?<![a-z])watakushi(?![a-z])", "watashi", out)  # 私 в песнях — почти всегда «watashi»
 
 
 def _ko(text: str) -> str:
@@ -84,6 +85,19 @@ def translit_line(text: str, han: str) -> str:
         pos = m.end()
     parts.append(text[pos:])
     return _tidy("".join(parts))
+
+
+def syllabic(s: str) -> bool:
+    tokens = re.findall(r"[a-zāēīōū]+", (s or "").lower())
+    if len(tokens) < 4:
+        return False
+    short = sum(1 for t in tokens if len(t) <= 3) / len(tokens)
+    return short >= 0.8 and sum(map(len, tokens)) / len(tokens) <= 2.6
+
+
+def tidy_hint(hint: str) -> str:
+    h = re.sub(r"(?<![a-z])wo(?![a-z])", "o", hint.lower())
+    return _tidy(h)
 
 
 def normalize_hint(hint: str) -> str:
@@ -143,7 +157,8 @@ def main() -> None:
             tr = translit_line(text, han)
             only_cjk = not re.search(r"[A-Za-z]", text)
             if hint and only_cjk and re.search(f"[{KANA}]", text):
-                tr = align_to_hint(tr, hint)
+                # romalrc уже по словам — это певческие чтения, берём как есть; по слогам — выравниваем
+                tr = tidy_hint(hint) if not syllabic(hint) else align_to_hint(tr, hint)
             out.append(tr or None)
         except Exception as e:  # noqa: BLE001 — нет библиотеки или странный ввод: доделает Gemini
             print(f"translit: {e!r}", file=sys.stderr)

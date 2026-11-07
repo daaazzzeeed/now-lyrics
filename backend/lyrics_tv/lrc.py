@@ -122,19 +122,19 @@ def add_gaps(lines: list[dict], gap_ms: int = GAP_MS) -> list[dict]:
     return out
 
 
-def copy_translit_by_text(dst: list[dict], src: list[dict], window_ms: int = 4000) -> None:
-    """Транслитерация из строк LRC (к ним приклеен romalrc) в строки yrc: тот же текст, рядом по времени."""
+def copy_translit_by_text(dst: list[dict], src: list[dict], window_ms: int = 4000, field: str = "hint") -> None:
+    """Поле (подсказка romalrc) из строк LRC в строки yrc: тот же текст, рядом по времени."""
     by_text: dict[str, list[dict]] = {}
     for ln in src:
-        if ln.get("translit"):
+        if ln.get(field):
             by_text.setdefault(norm(ln["text"]), []).append(ln)
     for ln in dst:
         cands = by_text.get(norm(ln.get("text", "")))
-        if ln.get("translit") or not cands:
+        if ln.get(field) or not cands:
             continue
         best = min(cands, key=lambda c: abs(c["t"] - ln["t"]))
         if abs(best["t"] - ln["t"]) <= window_ms:
-            ln["translit"] = best["translit"]
+            ln[field] = best[field]
 
 
 def lyrics_from_lrc(synced_text: str, plain_text: str, source: str) -> dict | None:
@@ -252,12 +252,33 @@ def is_syllabic(romaji: str) -> bool:
 
 
 def needs_translit(ln: dict, lang: str | None = None) -> bool:
-    """Строке с CJK или хангылем нужна транслитерация, если её нет или она по слогам.
+    """Строке с CJK или хангылем нужна транслитерация, если её ещё нет (или она по слогам — старый кэш).
     Строки без CJK (английские вставки) не трогаем. lang оставлен для совместимости."""
     if not ln.get("text") or not CJK_ANY.search(ln["text"]):
         return False
     tr = ln.get("translit")
-    return not tr or (bool(KANA.search(ln["text"]) or HANGUL.search(ln["text"])) and is_syllabic(tr))
+    return not tr or is_syllabic_line(tr)
+
+
+def is_syllabic_line(tr: str) -> bool:
+    """Слоговость считаем только по латинским словам без английских: «Baby love again ya sa shi sa» — по слогам."""
+    words = re.findall(r"[a-zāēīōū]+", (tr or "").lower())
+    words = [w for w in words if w not in _EN_COMMON]
+    return is_syllabic(" ".join(words))
+
+
+_EN_COMMON = set("baby love again oh yeah you me my your i the a and to be is it so no all one more "
+                 "every day night way back go come on hey uh ah oo ooh".split())
+
+
+def strip_inline_translation(lines: list[dict]) -> None:
+    """«人民翻身当家做主人^The people rose up…» — перевод, приклеенный через ^, отрезаем (переведём сами)."""
+    for ln in lines:
+        t = ln.get("text", "")
+        if "^" in t:
+            left, right = t.split("^", 1)
+            if CJK_ANY.search(left) and not CJK_ANY.search(right):
+                ln["text"] = left.strip()
 
 
 def promote_sub_to_translit(lyr: dict) -> None:
@@ -269,14 +290,22 @@ def promote_sub_to_translit(lyr: dict) -> None:
             ln["translit"] = ln.pop("sub")
 
 
+LYRICS_REV = 3  # 3: romalrc NetEase — только подсказка (hint), транслитерацию всегда делают библиотеки
+
+
 def migrate(lyr: dict | None) -> dict | None:
-    """Старый кэш: поле romaji → translit."""
+    """Старый кэш: romaji → translit; ромадзи NetEase (часто по слогам) → hint, чтобы переделали библиотеки."""
     if not lyr:
         return lyr
+    old_rev = lyr.get("rev", 1)
     for ln in lyr.get("lines", []):
         if "romaji" in ln:
             r = ln.pop("romaji")
             ln.setdefault("translit", r)
+        if old_rev < 3 and lyr.get("source") == "netease" and ln.get("translit") \
+                and (KANA.search(ln.get("text", "")) or HANGUL.search(ln.get("text", ""))):
+            ln.setdefault("hint", ln.pop("translit"))
+    lyr["rev"] = LYRICS_REV
     return lyr
 
 
@@ -331,11 +360,18 @@ def _scripts_differ(a: list[str], b: list[str]) -> bool:
     return latin(a) != latin(b)
 
 
+def netease_artist_match(song: dict, artists: list[str]) -> bool:
+    want = [norm(a) for a in artists if norm(a)]
+    names = [norm(a.get("name", "")) for a in (song.get("artists") or song.get("ar") or []) if isinstance(a, dict)]
+    return any(a and (a in b or b in a) for a in names for b in want)
+
+
 def netease_duration(song: dict) -> int:
     return int(song.get("duration") or song.get("dt") or 0)
 
 
-def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int, album: str = "") -> dict | None:
+def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int, album: str = "",
+                 title_only: bool = False) -> dict | None:
     """NetEase: длительность ±2 с и совпал артист (название без артиста — только если имена в разных
     письменностях); ближе по длительности лучше, при равенстве — артист, альбом, название."""
     want_t = norm(clean_title(title))
@@ -353,7 +389,7 @@ def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int, album
         a_ok = any(a and (a in b or b in a) for a in names for b in want_a)
         t = norm(song.get("name", ""))
         t_ok = bool(t and want_t) and (t == want_t or t in want_t or want_t in t)
-        if not a_ok and not (t_ok and _scripts_differ(names, want_a)):
+        if not a_ok and not (t_ok and (title_only or _scripts_differ(names, want_a))):
             continue  # тот же трек у другого латинского артиста — почти всегда кавер
         alb = norm(((song.get("album") or song.get("al") or {}) or {}).get("name", ""))
         album_ok = bool(want_album and alb and (alb == want_album or want_album in alb or alb in want_album))
