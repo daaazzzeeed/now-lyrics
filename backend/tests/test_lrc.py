@@ -369,12 +369,19 @@ def test_card_contrast_on_light_covers(tmp_path, rgb):
 
 def test_font_family_and_plan():
     tr = {"id": "x", "title": "空", "artists": [], "album": ""}
-    assert fonts.plan(tr, None, "ja")[0] == "JP"
-    assert fonts.plan(dict(tr, title="사랑"), None, "ko")[0] == "KR"
-    assert fonts.plan(dict(tr, title="我們的愛"), None, "zh")[0] == "TC"
-    assert fonts.plan(dict(tr, title="我们的爱"), None, "zh")[0] == "SC"
-    assert fonts.plan(dict(tr, title="Hello"), None, None) is None
-    assert fonts.plan(tr, L("夜明け"), "ja")[1] == "".join(sorted(set("空夜明け")))  # название + текст
+    fam = lambda t, lang, raw=None: [x[0] for x in fonts.plan(dict(tr, title=t), raw, lang)]  # noqa: E731
+    assert fam("空", "ja") == ["JP"]
+    assert fam("사랑", "ko") == ["KR"]
+    assert fam("我們的愛", "zh") == ["TC"] and fam("我们的爱", "zh") == ["SC"]
+    assert fam("Hello", None) == []
+    assert fonts.plan(tr, L("夜明け"), "ja")[0][1] == "".join(sorted(set("空夜明け")))  # название + текст
+
+
+def test_mixed_track_gets_korean_font_for_hangul():
+    tr = {"id": "x", "title": "八方來財", "artists": [], "album": ""}
+    urls = fonts.font_urls(tr, L("財從八方來 財 (시집가는 꿈을 꾸나?)"), "zh")
+    assert [u["url"].split("?")[0] for u in urls] == ["/font/x-TC.woff2", "/font/x-KR.woff2"]
+    assert "AC00" in urls[1]["range"] and "AC00" not in urls[0]["range"]
 
 
 def test_font_worker_makes_woff2(tmp_path):

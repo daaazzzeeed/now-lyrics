@@ -93,27 +93,30 @@
     back.src = url;
   }
 
-  // ── жирный CJK-шрифт трека: подмножество с сервера, пока грузится — системный шрифт ──
-  var BASE_FONT = getComputedStyle(body).fontFamily, fontUrl = null, fontFace = null;
-  var CJK_RANGE = 'U+3000-30FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FF00-FFEF, U+AC00-D7AF, ' +
-                  'U+1100-11FF, U+3130-318F, U+31F0-31FF';
-  function applyFont(url) {
-    if (url === fontUrl) return;
-    fontUrl = url;
-    if (!url) { body.style.fontFamily = ''; return; }
+  // ── жирный CJK-шрифт трека: подмножества с сервера (для смешанных треков — отдельный корейский),
+  //    пока грузятся — системный шрифт ──
+  var BASE_FONT = getComputedStyle(body).fontFamily, fontKey = null, fontFaces = [];
+  function applyFonts(list) {
+    var key = (list || []).map(function (f) { return f.url; }).join('|');
+    if (key === fontKey) return;
+    fontKey = key;
+    if (!key) { body.style.fontFamily = ''; return; }
     if (!window.FontFace || !document.fonts) return;
-    var fam = 'CJK-' + url.replace(/[^A-Za-z0-9]/g, '').slice(-16);
-    var face = new FontFace(fam, 'url(' + url + '&key=' + encodeURIComponent(KEY) + ')',
-                            { weight: '100 900', unicodeRange: CJK_RANGE, display: 'swap' });
-    face.load().then(function () {
-      if (fontUrl !== url) return;                       // трек уже сменился
-      document.fonts.add(face);
-      if (fontFace) document.fonts.delete(fontFace);
-      fontFace = face;
+    var fam = 'CJK-' + key.replace(/[^A-Za-z0-9]/g, '').slice(-16);
+    var faces = list.map(function (f) {
+      return new FontFace(fam, 'url(' + f.url + '&key=' + encodeURIComponent(KEY) + ')',
+                          { weight: '100 900', unicodeRange: f.range, display: 'swap' });
+    });
+    Promise.all(faces.map(function (f) { return f.load().catch(function () { return null; }); })).then(function (ok) {
+      if (fontKey !== key) return;                        // трек уже сменился
+      fontFaces.forEach(function (f) { document.fonts.delete(f); });
+      fontFaces = ok.filter(Boolean);
+      if (!fontFaces.length) return;                      // нет шрифтов — остаётся системный
+      fontFaces.forEach(function (f) { document.fonts.add(f); });
       body.style.fontFamily = '"' + fam + '", ' + BASE_FONT;
       activeIdx = -2; lastY = -1;                         // высоты строк изменились
       fitTitle();
-    }).catch(function () { /* нет шрифта — остаётся системный */ });
+    });
   }
 
   // ── длинное название: до двух строк, иначе бегущая строка (только transform) ──
@@ -313,7 +316,7 @@
       setCover(tr.cover + (tr.cover.indexOf('?') < 0 ? '?' : '&') + 'key=' + encodeURIComponent(KEY));
       lastSec = -1;
     }
-    applyFont(tr && tr.font ? tr.font : null);
+    applyFonts(tr && tr.fonts ? tr.fonts : null);
     var bare = !!tr && m.lyrics_state === 'none';
     if (bare !== body.classList.contains('bare')) { body.classList.toggle('bare', bare); fitTitle(); }
     renderLyrics();

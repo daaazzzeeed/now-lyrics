@@ -17,7 +17,7 @@ import httpx
 from . import config as C
 from .cache import Cache
 from .demo import DemoPlayer
-from .fonts import font_url
+from .fonts import font_urls
 from .lrc import LANGS, adjust, detect_lang, han_lang, has_translit, lyrics_lang, needs_translit, \
     promote_sub_to_translit
 from .media import DEFAULT_PALETTE, compute_palette, ensure_cover, fallback_palette, palette_fresh
@@ -89,7 +89,7 @@ class Hub:
             track = {k: self.track[k] for k in ("id", "title", "album", "duration_ms")}
             track["artists"] = ", ".join(self.track["artists"])
             track["cover"] = f"/cover/{self.track['id']}.jpg"
-            track["font"] = font_url(self.track, self.raw, self.lang)
+            track["fonts"] = font_urls(self.track, self.raw, self.lang)
         return {
             "t": "state", "status": "connecting" if stale else self.status, "track": track,
             "lyrics": self.lyrics, "lyrics_state": self.lyrics_state, "palette": self.palette,

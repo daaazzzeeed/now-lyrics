@@ -134,16 +134,17 @@ async def cover(tid: str, request: Request):
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=604800"})
 
 
-@app.get("/font/{tid}.woff2")
-async def font(tid: str, request: Request):
-    """Жирное подмножество Noto Sans CJK под текущий трек (символы текста и названия)."""
+@app.get("/font/{name}.woff2")
+async def font(name: str, request: Request):
+    """Жирное подмножество Noto Sans CJK под текущий трек: /font/{id}-{JP|KR|SC|TC}.woff2."""
     if not key_ok(request):
         return forbidden()
     hub: Hub = request.app.state.hub
-    if not hub.track or hub.track["id"] != tid:
+    tid, _, fam = name.rpartition("-")
+    if not hub.track or hub.track["id"] != tid or fam not in ("JP", "KR", "SC", "TC"):
         return PlainTextResponse("not current", status_code=404)
     try:
-        path = await ensure_subset(hub.client, hub.track, hub.raw, hub.lang)
+        path = await ensure_subset(hub.client, hub.track, hub.raw, hub.lang, fam)
     except Exception as e:  # noqa: BLE001
         log.warning("шрифт %s: %s", tid, e)
         path = None

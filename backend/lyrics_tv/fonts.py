@@ -50,20 +50,41 @@ def family(lang: str | None, text: str) -> str | None:
     return None
 
 
-def plan(track: dict, raw: dict | None, lang: str | None) -> tuple[str, str, str] | None:
-    """→ (семейство, символы, хеш) или None, если CJK-символов нет."""
+def _is_hangul(ch: str) -> bool:
+    o = ord(ch)
+    return 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F
+
+
+RANGES = {
+    "hangul": "U+AC00-D7AF, U+1100-11FF, U+3130-318F",
+    "cjk": "U+3000-30FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FF00-FFEF, U+31F0-31FF",
+}
+RANGES["all"] = RANGES["cjk"] + ", " + RANGES["hangul"]
+
+
+def plan(track: dict, raw: dict | None, lang: str | None) -> list[tuple[str, str, str, str]]:
+    """→ [(семейство, символы, хеш, диапазон)]. В китайском и японском подмножествах Noto нет хангыля,
+    поэтому для смешанных треков (китайский + корейский) хангыль идёт отдельным KR-шрифтом."""
     texts = _texts(track, raw)
-    chars = "".join(sorted({ch for t in texts for ch in t if _is_cjk(ch)}))
-    fam = family(lang, "".join(texts))
-    if not chars or not fam:
-        return None
-    h = hashlib.sha1(f"{fam}|{chars}".encode()).hexdigest()[:12]
-    return fam, chars, h
+    chars = sorted({ch for t in texts for ch in t if _is_cjk(ch)})
+    if not chars:
+        return []
+    joined = "".join(texts)
+    main = family(lang, joined) or ("KR" if any(_is_hangul(c) for c in chars) else family("zh", joined))
+    groups: dict[tuple[str, str], list[str]] = {}
+    for ch in chars:
+        key = (main, "all") if main == "KR" else (("KR", "hangul") if _is_hangul(ch) else (main, "cjk"))
+        groups.setdefault(key, []).append(ch)
+    out = []
+    for (fam, rng), cs in groups.items():
+        text = "".join(cs)
+        out.append((fam, text, hashlib.sha1(f"{fam}|{text}".encode()).hexdigest()[:12], rng))
+    return out
 
 
-def font_url(track: dict, raw: dict | None, lang: str | None) -> str | None:
-    p = plan(track, raw, lang)
-    return f"/font/{track['id']}.woff2?h={p[2]}" if p else None
+def font_urls(track: dict, raw: dict | None, lang: str | None) -> list[dict]:
+    return [{"url": f"/font/{track['id']}-{fam}.woff2?h={h}", "range": RANGES[rng]}
+            for fam, _, h, rng in plan(track, raw, lang)]
 
 
 def _src_path(fam: str) -> Path:
@@ -97,11 +118,12 @@ def _prune() -> None:
         old.unlink(missing_ok=True)
 
 
-async def ensure_subset(client: httpx.AsyncClient, track: dict, raw: dict | None, lang: str | None) -> Path | None:
-    p = plan(track, raw, lang)
+async def ensure_subset(client: httpx.AsyncClient, track: dict, raw: dict | None, lang: str | None,
+                        want: str) -> Path | None:
+    p = next((x for x in plan(track, raw, lang) if x[0] == want), None)
     if not p:
         return None
-    fam, chars, h = p
+    fam, chars, h, _ = p
     out = C.FONTS_DIR / f"{track['id']}-{h}.woff2"
     if out.exists():
         os.utime(out)

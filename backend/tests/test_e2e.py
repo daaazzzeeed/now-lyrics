@@ -295,7 +295,7 @@ def play(tid):
 
 def test_access_key_and_static(srv):
     url = srv["url"]
-    for path in ("/", "/?key=wrong", "/events", "/cover/track42.jpg", "/font/track42.woff2", "/debug/track",
+    for path in ("/", "/?key=wrong", "/events", "/cover/track42.jpg", "/font/track42-JP.woff2", "/debug/track",
                  "/debug/offset?ms=1"):
         assert httpx.get(url + path).status_code == 403, path
     r = httpx.get(url + "/?key=k")
@@ -329,7 +329,7 @@ def test_netease_fallback_romalrc_and_gemini(srv):
     assert m["status"] == "playing" and m["playing"] is True
     tr = m["track"]
     assert (tr["id"], tr["title"], tr["artists"], tr["cover"]) == ("track42", "テストの歌", "テスト", "/cover/track42.jpg")
-    assert tr["font"].startswith("/font/track42.woff2?h=")
+    assert [f["url"].split("?")[0] for f in tr["fonts"]] == ["/font/track42-JP.woff2"]
     lyr = m["lyrics"]
     assert lyr["source"] == "netease" and lyr["source_id"] == "42" and lyr["synced"] and lyr["lang"] == "ja"
     assert texts(m) == ["テストの一行目です", "二行目はここ", "", "三行目の歌"]  # титры отфильтрованы
@@ -344,7 +344,7 @@ def test_netease_fallback_romalrc_and_gemini(srv):
     assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and r.content == Fake.img
     assert Fake.calls.get("/small.jpg") is None
 
-    r = httpx.get(srv["url"] + tr["font"] + "&key=k", timeout=60)
+    r = httpx.get(srv["url"] + tr["fonts"][0]["url"] + "&key=k", timeout=60)
     assert r.status_code == 200 and r.content[:4] == b"wOF2" and r.headers["content-type"] == "font/woff2"
     assert Fake.calls.get("/fonts/JP/NotoSansJP-Bold.otf") == 1
 
