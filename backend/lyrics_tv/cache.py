@@ -22,6 +22,15 @@ class Cache:
         # key: "track:<spotify id>" или "artist:<имя>"; поля NULL — «не задано»
         self.db.execute("CREATE TABLE IF NOT EXISTS overrides (key TEXT PRIMARY KEY, offset_ms INTEGER, "
                         "source TEXT, source_id TEXT, lang TEXT, updated INTEGER)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        self.db.commit()
+
+    def get_kv(self, key: str):
+        row = self.db.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def set_kv(self, key: str, value) -> None:
+        self.db.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, json.dumps(value)))
         self.db.commit()
 
     # ── кэш трека ──

@@ -630,3 +630,48 @@ def test_translation_gemini_only_when_google_fails(monkeypatch):
     lyr = {"lines": [{"t": 0, "text": "我想你"}]}
     assert translate_with(handler, lyr, "zh", monkeypatch, GEMINI_API_KEY="k")
     assert seen[0] == "single" and lyr["lines"][0]["translation"] == "я скучаю"
+
+
+# ── задержка старта колонки ──
+
+def test_start_lag_is_learned_and_hides_the_jump(tmp_path, monkeypatch):
+    from lyrics_tv import hub as H
+    clock = [1000.0]
+    monkeypatch.setattr(H.time, "monotonic", lambda: clock[0])
+    replies: list = []
+
+    class Sp:
+        configured = True
+
+        def days_left(self):
+            return None
+
+        async def player(self):
+            return replies.pop(0)
+
+    cache = Cache(tmp_path / "c.db")
+    h = H.Hub(None, Sp(), cache, None)
+    monkeypatch.setattr(h, "new_track", lambda info: setattr(h, "track", info))
+
+    def item(tid, p):
+        return {"is_playing": True, "progress_ms": p, "item": {
+            "type": "track", "id": tid, "name": "x", "duration_ms": 200000, "artists": [{"name": "a"}],
+            "album": {"name": "b", "images": []}}}
+
+    async def tick(at, tid, p):
+        clock[0] = at
+        replies.append(item(tid, p))
+        await h.tick()
+
+    async def go():
+        await tick(1000, "A", 1000)            # трек A: Spotify «забегает вперёд»…
+        await tick(1003, "A", 4000)
+        await tick(1030, "A", 31000 - 2500)     # …через 30 с поправка назад на 2.5 с
+        assert h.start_lag == 2500 and h.lag_fixed and cache.get_kv("start_lag_ms") == 2500
+        await tick(1100, "B", 1000)            # трек B: задержку вычитаем заранее
+        assert h.pos == 0 and not h.lag_fixed
+        await tick(1110, "B", 11000)
+        assert h.pos == 8500
+        await tick(1130, "B", 31000 - 2500)     # пришла поправка — позиция не прыгает
+        assert h.lag_fixed and h.pos == 28500
+    run(go())

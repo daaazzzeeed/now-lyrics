@@ -33,6 +33,8 @@ TRANSLIT_RETRY_S = (0, 20, 60)   # Gemini бывает перегружен — 
 TRANSLATE_RETRY_S = (0, 30, 120)
 WATCHDOG_S = 20                  # столько ждём в loading, затем один перезапуск поиска, затем none
 PREFETCH_DELAY_S = 3
+START_WINDOW_MS = 60_000      # до этой позиции трека ждём поправку от колонки
+LAG_MIN_MS, LAG_MAX_MS = 800, 5000
 
 
 def dumps(msg: dict) -> str:
@@ -62,6 +64,11 @@ class Hub:
         self.paused_since: float | None = None
         self.auth_days: int | None = None
         self.drift: list[int] = []   # последние расхождения progress Spotify с ожидаемым (для /debug/track)
+        # В начале трека Spotify считает, что звук уже идёт, а колонка (WiiM) ещё буферизует; секунд через
+        # 30 приходит поправка назад на ~2.5 с. Эту задержку выучиваем и вычитаем до поправки.
+        self.start_lag = int(cache.get_kv("start_lag_ms") or 0) if not demo else 0
+        self.lag_fixed = True
+        self.raw_pos, self.raw_mono = 0, time.monotonic()
         self.track_tasks: set[asyncio.Task] = set()   # задачи текущего поколения
         self.pipeline: asyncio.Task | None = None
         self.inflight: dict[str, asyncio.Task] = {}   # предзагрузка следующих треков
@@ -171,13 +178,31 @@ class Hub:
         playing = bool(js.get("is_playing"))
         progress = int(js.get("progress_ms") or 0)
         before = self.status
-        if playing and self.playing and self.track and self.track["id"] == info["id"]:
-            drift = progress - int(self.pos + (measured - self.pos_mono) * 1000)
+        same = bool(self.track) and self.track["id"] == info["id"]
+        if not same:
+            self.lag_fixed = False  # новый трек: Spotify снова «забежит вперёд», пока колонка буферизует
+        elif playing and self.playing:
+            drift = progress - int(self.raw_pos + (measured - self.raw_mono) * 1000)
             self.drift.append(drift)
             del self.drift[:-20]
             if abs(drift) > 1000:
                 log.info("Spotify: позиция разошлась с ожидаемой на %d мс", drift)
-        self.pos, self.pos_mono, self.playing = progress, measured, playing
+            if not self.lag_fixed and -LAG_MAX_MS < drift < -LAG_MIN_MS and progress < START_WINDOW_MS + 15_000:
+                self.lag_fixed = True  # колонка доложила настоящую позицию — учимся на этой поправке
+                if not self.demo:
+                    self.start_lag = round(0.7 * self.start_lag + 0.3 * -drift) if self.start_lag else -drift
+                    self.cache.set_kv("start_lag_ms", self.start_lag)
+                    log.info("задержка старта колонки: %d мс (поправка %d мс)", self.start_lag, drift)
+            elif abs(drift) > LAG_MAX_MS:
+                self.lag_fixed = True  # перемотка
+        if not self.lag_fixed and progress >= START_WINDOW_MS:
+            self.lag_fixed = True  # поправки не было — наша оценка, видимо, велика
+            if self.start_lag and not self.demo:
+                self.start_lag = round(self.start_lag * 0.8)
+                self.cache.set_kv("start_lag_ms", self.start_lag)
+        self.raw_pos, self.raw_mono = progress, measured
+        lag = 0 if self.lag_fixed else self.start_lag
+        self.pos, self.pos_mono, self.playing = max(0, progress - lag), measured, playing
         if playing:
             self.paused_since = None
         elif self.paused_since is None:
@@ -494,7 +519,7 @@ class Hub:
         out.update(lyrics_state=self.lyrics_state, lang=self.lang, meta=self.meta, override=self.override,
                    adj=(self.lyrics or {}).get("adj"), lines=len((self.raw or {}).get("lines", [])),
                    translit=has_translit(self.raw), position_ms=self.position(), preparing=sorted(self.inflight),
-                   spotify_drift_ms=self.drift[-10:])
+                   spotify_drift_ms=self.drift[-10:], start_lag_ms=self.start_lag, lag_fixed=self.lag_fixed)
         if self.demo:
             return out
         cands: list = []
