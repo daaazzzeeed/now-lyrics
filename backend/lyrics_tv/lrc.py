@@ -13,6 +13,8 @@ CREDIT = re.compile(
     r"^\s*(作词|作詞|作曲|编曲|編曲|制作人|製作|制作|混音|母带|和声|吉他|贝斯|鼓|钢琴|弦乐|录音|監製|监制|"
     r"出品|发行|企划|统筹|演唱|原唱|词|曲|lyrics?(\s+by)?|composed\s+by|composer|arranged\s+by|"
     r"arranger|produced\s+by|producer|written\s+by)\s*[:：]", re.I)
+CREDIT_CJK = re.compile(r"^\s*[\u4e00-\u9fff]{1,6}\s*[:：]")  # 录制：粒粒, 混音：龙龙, 和声编写：…
+RULE_LINE = re.compile(r"^[-—_=~*·.\s]{3,}$")
 PURE_MUSIC = re.compile(r"纯音乐|請欣賞|请欣赏")
 KANA = re.compile(r"[぀-ゟ゠-ヿㇰ-ㇿｦ-ﾟ]")
 JP_TEXT = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
@@ -20,6 +22,7 @@ CJK_ANY = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ가-힯]")
 HAN = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 HANGUL = re.compile(r"[가-힯ᄀ-ᇿ㄰-㆏]")
 # частые иероглифы, которые в традиционном и упрощённом письме различаются
+YUE_CHARS = set("嘅咗佢唔冇喺嚟哋啲乜嘢咁囉吖嗰噉揾搵睇俾畀攞啱咩喇嚿冧氹㗎嘞嚟噃哂諗瞓攰")
 TRAD_ONLY = set("們個來說時會為這國對還過愛裡樣點開關問發讓聽見風車東書長門當實現經學無與後動體從頭將麼話歲夢淚邊總離誰顏戀聲憶")
 SIMP_ONLY = set("们个来说时会为这国对还过爱里样点开关问发让听见风车东书长门当实现经学无与后动体从头将么话岁梦泪边总离谁颜恋声忆")
 
@@ -33,7 +36,9 @@ LANGS = ("ja", "ko", "zh", "yue")
 
 
 def is_credit(text: str, t: int) -> bool:
-    return bool(text) and t < CREDIT_WINDOW_MS and bool(CREDIT.match(text))
+    if not text or t >= CREDIT_WINDOW_MS:
+        return False
+    return bool(CREDIT.match(text) or CREDIT_CJK.match(text) or RULE_LINE.match(text))
 
 
 def parse_lrc(text: str) -> tuple[list[dict], list[str]]:
@@ -143,24 +148,34 @@ def is_japanese(lyr: dict | None) -> bool:
 
 
 def detect_lang(texts: list[str]) -> str | None:
-    """Язык по тексту: хангыль → ko, кана → ja (даже если часть строк только из кандзи), иероглифы → zh."""
+    """Язык по преобладающей письменности: кана → ja, хангыль → ko, иероглифы → zh (или yue)."""
     joined = "\n".join(texts)
-    if HANGUL.search(joined):
-        return "ko"
-    if KANA.search(joined):
+    if KANA.search(joined) and len(KANA.findall(joined)) >= 0.05 * max(1, len(HANGUL.findall(joined))):
         return "ja"
-    if HAN.search(joined):
-        return "zh"
+    hangul, han = len(HANGUL.findall(joined)), len(HAN.findall(joined))
+    if hangul and hangul >= han:
+        return "ko"
+    if han:
+        return "yue" if is_cantonese(joined) else "zh"
     return None
 
 
 def lyrics_lang(lyr: dict | None) -> str | None:
-    texts = _texts(lyr)
-    if any(HANGUL.search(s) for s in texts):
-        return "ko"
-    if is_japanese(lyr):
+    return detect_lang(_texts(lyr))
+
+
+def is_cantonese(text: str) -> bool:
+    return sum(1 for ch in text if ch in YUE_CHARS) >= 3
+
+
+def han_lang(lyr: dict | None, override: str | None = None) -> str:
+    """Как читать иероглифы трека: ja — если в песне есть кана, иначе yue/zh (ручной выбор важнее)."""
+    joined = "\n".join(_texts(lyr))
+    if KANA.search(joined):
         return "ja"
-    return detect_lang(texts)
+    if override in ("zh", "yue"):
+        return override
+    return "yue" if is_cantonese(joined) else "zh"
 
 
 def is_traditional(text: str) -> bool:
@@ -183,18 +198,13 @@ def is_syllabic(romaji: str) -> bool:
     return short >= 0.85 and avg <= 2.4
 
 
-def script_of(lang: str | None):
-    return {"ja": JP_TEXT, "ko": HANGUL, "zh": HAN, "yue": HAN}.get(lang or "")
-
-
-def needs_translit(ln: dict, lang: str | None) -> bool:
-    """Строка на языке трека без транслитерации — или с транслитерацией по слогам (её лучше переделать).
-    Строки без CJK и хангыля (например, английские) не трогаем."""
-    rx = script_of(lang)
-    if not rx or not ln.get("text") or not rx.search(ln["text"]):
+def needs_translit(ln: dict, lang: str | None = None) -> bool:
+    """Строке с CJK или хангылем нужна транслитерация, если её нет или она по слогам.
+    Строки без CJK (английские вставки) не трогаем. lang оставлен для совместимости."""
+    if not ln.get("text") or not CJK_ANY.search(ln["text"]):
         return False
     tr = ln.get("translit")
-    return not tr or (lang in ("ja", "ko") and is_syllabic(tr))
+    return not tr or (bool(KANA.search(ln["text"]) or HANGUL.search(ln["text"])) and is_syllabic(tr))
 
 
 def promote_sub_to_translit(lyr: dict) -> None:

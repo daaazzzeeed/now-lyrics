@@ -82,17 +82,32 @@ def test_detect_lang():
     assert lrc.lyrics_lang(L("사랑해요", "I love you", "너를")) == "ko"
     assert lrc.lyrics_lang(L("夜明けの散歩", "遠い街", "君に届く")) == "ja"   # кандзи без каны в части строк
     assert lrc.lyrics_lang(L("我爱你", "月亮代表我的心")) == "zh"
+    assert lrc.lyrics_lang(L("佢唔係咁嘅人", "我哋去咗")) == "yue"            # кантонские иероглифы
+    assert lrc.lyrics_lang(L("財從八方來 財 (시집가는 꿈을 꾸나?)", "我們這的憨佬仔", "香爐供台上擺")) == "zh"
     assert lrc.lyrics_lang(L("hello", "world")) is None
     assert lrc.is_traditional("我們的愛會說話") and not lrc.is_traditional("我们的爱会说话")
 
 
-def test_needs_translit_per_language():
-    assert lrc.needs_translit({"text": "사랑해요"}, "ko")
-    assert not lrc.needs_translit({"text": "I love you"}, "ko")         # английские строки не трогаем
-    assert lrc.needs_translit({"text": "我爱你"}, "zh")
-    assert lrc.needs_translit({"text": "突然のキスや", "translit": "to tsu ze n no ki su ya"}, "ja")
-    assert not lrc.needs_translit({"text": "突然のキスや", "translit": "totsuzen no kisu ya"}, "ja")
-    assert not lrc.needs_translit({"text": "我爱你"}, None)
+def test_han_reading():
+    assert lrc.han_lang(L("君の名は", "宇宙")) == "ja"             # есть кана — иероглифы по-японски
+    assert lrc.han_lang(L("我想你")) == "zh"
+    assert lrc.han_lang(L("我想你"), "yue") == "yue"               # ручной выбор
+    assert lrc.han_lang(L("佢唔係咁嘅人")) == "yue"
+
+
+def test_needs_translit_per_line():
+    assert lrc.needs_translit({"text": "사랑해요"})
+    assert not lrc.needs_translit({"text": "I love you"})          # английские строки не трогаем
+    assert lrc.needs_translit({"text": "我爱你"})
+    assert lrc.needs_translit({"text": "財從八方來 (시집가는 꿈을 꾸나?)"})  # смешанная строка
+    assert lrc.needs_translit({"text": "突然のキスや", "translit": "to tsu ze n no ki su ya"})
+    assert not lrc.needs_translit({"text": "突然のキスや", "translit": "totsuzen no kisu ya"})
+
+
+def test_netease_credits_cjk_and_rules():
+    lines, _ = lrc.parse_lrc("[00:06.019]录制：粒粒\n[00:07.054]混音：龙龙\n[00:08.469]--------------------\n"
+                             "[00:10.208]용감한 내 가방\n")
+    assert [x["text"] for x in lines] == ["용감한 내 가방"]
 
 
 def test_syllabic():
@@ -322,14 +337,6 @@ def test_gemini_prompt_per_language(monkeypatch, lang, word):
     assert word in prompts[0]
 
 
-def test_phases_near_position_first():
-    lines = [{"t": i * 5000, "text": f"行{i}"} for i in range(20)]
-    todo = list(range(20))
-    first, rest = translit.phases(lines, todo, pos_ms=50_000, synced=True)
-    assert first == list(range(10, 18))           # от текущей строки (−3 с) — ближайшие 8
-    assert rest == [18, 19] + list(range(10))     # потом будущие, уже спетые — в конце
-
-
 # ── палитра ──
 
 def test_palette_worker(tmp_path):
@@ -380,27 +387,50 @@ def test_font_worker_makes_woff2(tmp_path):
     assert out.read_bytes()[:4] == b"wOF2" and out.stat().st_size < src.stat().st_size
 
 
-def test_fill_splits_phase2_into_parallel_chunks(monkeypatch):
+def test_gemini_only_for_lines_local_could_not_do(monkeypatch):
     monkeypatch.setattr(C, "GEMINI_API_KEY", "k")
-    sizes, inflight, peak = [], [0], [0]
+    calls = []
+
+    async def worker(han, texts, hints):
+        return [None if "?" in t else f"local:{t}" for t in texts]   # «?» — будто библиотека не справилась
+    monkeypatch.setattr(translit, "run_worker", worker)
 
     async def handler(req):
         items = json.loads(json.loads(req.content)["contents"][0]["parts"][0]["text"])
-        sizes.append(len(items))
-        inflight[0] += 1
-        peak[0] = max(peak[0], inflight[0])
-        await asyncio.sleep(0.05)
-        inflight[0] -= 1
-        out = [f"r{x['text']}" for x in items]
+        calls.append([x["text"] for x in items])
+        out = [f"llm:{x['text']}" for x in items]
         return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": json.dumps(out)}]}}]})
 
-    lyr = {"synced": True, "lines": [{"t": i * 4000, "text": f"行{i}"} for i in range(40)]}
+    lyr = {"synced": True, "lines": [{"t": i * 1000, "text": t} for i, t in
+                                     enumerate(["我想你", "I love you", "月?", "사랑", "星?"])]}
     updates = []
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await translit.fill(client, lyr, "ja", lambda: 0, {}, lambda: updates.append(1))
+            return await translit.fill(client, lyr, "zh", {}, lambda: updates.append(1))
     assert run(go()) is True
-    assert sizes[0] == 8 and sorted(sizes[1:]) == [2, 10, 10, 10]   # 8 у позиции, затем куски по 10
-    assert 1 < peak[0] <= 3 and len(updates) == 5
-    assert all(ln["translit"] == "r" + ln["text"] for ln in lyr["lines"])
+    assert [ln.get("translit") for ln in lyr["lines"]] == ["local:我想你", None, "llm:月?", "local:사랑", "llm:星?"]
+    assert calls == [["月?", "星?"]]          # в LLM ушли только две строки, одним запросом
+    assert len(updates) == 2
+
+
+# ── локальная транслитерация (настоящие библиотеки) ──
+
+def test_worker_scripts_per_run():
+    pytest.importorskip("cutlet")
+    from lyrics_tv.translit_worker import translit_line
+    assert translit_line("財從八方來 財 (시집가는 꿈을 꾸나?)", "yue") == \
+        "coi4 cung4 baat3 fong1 loi4 coi4 (sijipganeun kkumeul kkuna?)"
+    assert translit_line("我想你", "zh") == "wǒ xiǎng nǐ"
+    assert translit_line("용감한 내 가방, no keyring", "zh") == "yonggamhan nae gabang, no keyring"
+    assert translit_line("恋のプログラムを", "zh").startswith("koi no puroguramu o")   # кана → японский
+
+
+def test_worker_aligns_netease_syllables():
+    from lyrics_tv.translit_worker import align_to_hint, normalize_hint
+    assert normalize_hint("hi ru to yo ru ga gi ya ku no ku ra shi wo") == "hi ru to yo ru ga gya ku no ku ra shi o"
+    assert align_to_hint("totsuzen no kisu ya", "to tsu ze n no ki su ya") == "totsuzen no kisu ya"
+    # певческое чтение из подсказки (君 kimi, 宇宙 sora), деление на слова — от локального
+    assert align_to_hint("kun wa uchuu, watashi wa hoshi", "ki mi wa so ra wa ta shi wa ho shi") == \
+        "kimi wa sora watashi wa hoshi"
+    assert align_to_hint("kun wa uchuu", "ki mi wa so ra") == "kun wa uchuu"     # слишком разные — не верим
