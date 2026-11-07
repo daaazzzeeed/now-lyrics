@@ -19,18 +19,40 @@
   };
 
   var S = { status: 'connecting', track: null, lyrics: null, lyrics_state: 'none', offset: 0 };
-  var basePos = 0, baseAt = performance.now(), playing = false;
+  var basePos = 0, baseAt = performance.now(), rate = 1, rateUntil = 0, playing = false;
+  var SNAP_MS = 2500;      // расхождение больше — это перемотка, прыгаем сразу
+  var SLEW_MS = 2500;      // меньшее расхождение выбираем плавно за это время
+  var SLOWEST = 0.6, FASTEST = 1.4;
   var rows = [], synced = false, activeIdx = -2, lastY = -1, lastSec = -1;
   var trackId = null, lyricsKey = null, paletteKey = null;
   var bgFront = el.bgA, coverFront = null;
 
   // ── позиция: сервер присылает раз в несколько секунд, между ними считаем сами ──
-  function curPos() { return playing ? basePos + (performance.now() - baseAt) : basePos; }
+  // Позиция на экране. Spotify присылает progress с дрожанием ±0.5–1.5 с; если просто прыгать
+  // на каждое значение, активная строка дёргается вперёд-назад. Поэтому мелкие расхождения
+  // догоняем, меняя скорость часов (0.6–1.4×): позиция никогда не идёт назад, кроме перемотки.
+  function rebase() {
+    var now = performance.now();
+    if (playing) basePos += (now - baseAt) * rate;
+    baseAt = now;
+  }
+  function curPos() {
+    var now = performance.now();
+    if (!playing) return basePos;
+    if (rate !== 1 && now >= rateUntil) {           // догнали — дальше обычная скорость
+      basePos += (rateUntil - baseAt) * rate; baseAt = rateUntil; rate = 1;
+    }
+    return basePos + (now - baseAt) * rate;
+  }
   function setPos(p, isPlaying) {
-    var predicted = curPos();
-    // мелкие откаты назад — это дрожание отчёта Spotify, а не перемотка: игнорируем
-    if (isPlaying && playing && p < predicted && predicted - p < 450) p = predicted;
-    basePos = p; baseAt = performance.now(); playing = isPlaying;
+    var predicted = curPos(), now = performance.now();
+    if (!isPlaying || !playing || Math.abs(p - predicted) > SNAP_MS) {
+      basePos = p; baseAt = now; rate = 1; playing = isPlaying;   // пауза, старт, перемотка
+      return;
+    }
+    rebase();
+    rate = Math.min(FASTEST, Math.max(SLOWEST, 1 + (p - predicted) / SLEW_MS));
+    rateUntil = now + SLEW_MS;
   }
   function fmt(sec) { sec = Math.max(0, sec); return Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2); }
 

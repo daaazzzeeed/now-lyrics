@@ -59,6 +59,7 @@ class Hub:
         self.playing = False
         self.paused_since: float | None = None
         self.auth_days: int | None = None
+        self.drift: list[int] = []   # последние расхождения progress Spotify с ожидаемым (для /debug/track)
         self.track_tasks: set[asyncio.Task] = set()   # задачи текущего поколения
         self.pipeline: asyncio.Task | None = None
         self.inflight: dict[str, asyncio.Task] = {}   # предзагрузка следующих треков
@@ -150,9 +151,11 @@ class Hub:
         if not self.demo and not self.spotify.configured:
             self.set_status("setup")
             return 30.0
+        sent = time.monotonic()
         js = await (self.demo or self.spotify).player()
         now = time.monotonic()
         self.last_tick = now
+        measured = sent + (now - sent) / 2  # progress_ms соответствует середине запроса, а не его концу
         days = None if self.demo else self.spotify.days_left()
         days_changed = days != self.auth_days
         self.auth_days = days
@@ -166,7 +169,13 @@ class Hub:
         playing = bool(js.get("is_playing"))
         progress = int(js.get("progress_ms") or 0)
         before = self.status
-        self.pos, self.pos_mono, self.playing = progress, now, playing
+        if playing and self.playing and self.track and self.track["id"] == info["id"]:
+            drift = progress - int(self.pos + (measured - self.pos_mono) * 1000)
+            self.drift.append(drift)
+            del self.drift[:-20]
+            if abs(drift) > 1000:
+                log.info("Spotify: позиция разошлась с ожидаемой на %d мс", drift)
+        self.pos, self.pos_mono, self.playing = progress, measured, playing
         if playing:
             self.paused_since = None
         elif self.paused_since is None:
@@ -450,7 +459,8 @@ class Hub:
             return out
         out.update(lyrics_state=self.lyrics_state, lang=self.lang, meta=self.meta, override=self.override,
                    adj=(self.lyrics or {}).get("adj"), lines=len((self.raw or {}).get("lines", [])),
-                   translit=has_translit(self.raw), position_ms=self.position(), preparing=sorted(self.inflight))
+                   translit=has_translit(self.raw), position_ms=self.position(), preparing=sorted(self.inflight),
+                   spotify_drift_ms=self.drift[-10:])
         if self.demo:
             return out
         cands: list = []

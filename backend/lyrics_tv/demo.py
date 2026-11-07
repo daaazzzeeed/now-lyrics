@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 
 from . import config as C
@@ -14,6 +15,7 @@ class DemoPlayer:
         self.tracks = data["tracks"]
         self.idle_ms = int(data.get("idle_ms", 15000))
         self.t0 = time.monotonic() - C.DEMO_START_MS / 1000
+        self.jitter = int(C.env("DEMO_JITTER_MS", "0"))  # как у Spotify Connect: progress «дрожит»
 
     @staticmethod
     def _item(t: dict) -> dict:
@@ -34,6 +36,7 @@ class DemoPlayer:
         i, el = self._now()
         if i is None:
             return None
+        el = max(0, el + random.randint(-self.jitter, self.jitter)) if self.jitter else el
         return {"is_playing": True, "progress_ms": el, "item": self._item(self.tracks[i])}
 
     def queue(self) -> list[dict]:
