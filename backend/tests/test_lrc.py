@@ -147,7 +147,8 @@ def test_pick_netease():
         {"id": 5, "name": "テストの歌", "ar": [{"name": "テスト"}], "dt": 201400, "al": {"name": "盤"}},
     ]
     assert lrc.pick_netease(songs[:2], "テストの歌", ["テスト"], 201000) is None
-    assert lrc.pick_netease(songs[:3], "testの歌", ["X"], 201000)["id"] == 3
+    assert lrc.pick_netease(songs[:3], "testの歌", ["X"], 201000) is None          # другой латинский артист
+    assert lrc.pick_netease(songs[:3], "testの歌", ["誰でも"], 201000)["id"] == 3   # имена в разных письменностях
     assert lrc.pick_netease(songs, "テストの歌 (feat. A)", ["テスト"], 201000, "盤")["id"] == 5
 
 
@@ -434,3 +435,44 @@ def test_worker_aligns_netease_syllables():
     assert align_to_hint("kun wa uchuu, watashi wa hoshi", "ki mi wa so ra wa ta shi wa ho shi") == \
         "kimi wa sora watashi wa hoshi"
     assert align_to_hint("kun wa uchuu", "ki mi wa so ra") == "kun wa uchuu"     # слишком разные — не верим
+
+
+def test_netease_rejects_covers_by_other_artists():
+    covers = [{"id": 1, "name": "NOT CUTE ANYMORE", "ar": [{"name": "bambygu"}], "dt": 131997},
+              {"id": 2, "name": "NOT CUTE ANYMORE（Cover：ILLIT）", "ar": [{"name": "XUEHAN_"}], "dt": 132077}]
+    assert lrc.pick_netease(covers, "NOT CUTE ANYMORE", ["ILLIT"], 132000) is None
+    assert lrc.pick_netease([{"id": 3, "name": "Plastic Love", "ar": [{"name": "竹内まりや"}], "dt": 294500}],
+                            "Plastic Love", ["Mariya Takeuchi"], 294000)["id"] == 3
+
+
+YRC = ('{"t":1000,"c":[{"tx":"作曲: "},{"tx":"X"}]}\n'
+       "[10740,4680](10740,510,0)One (11250,480,0)more (11730,1320,0)night\n"
+       "[15480,4320](15480,420,0)One (15900,570,0)more (16470,1770,0)round\n"
+       "[26000,2000](26000,500,0)Late (26500,800,0)line\n")
+
+
+def test_yrc_word_timing_and_gaps():
+    lines = lrc.add_gaps(lrc.parse_yrc(YRC))
+    assert lines == [{"t": 10740, "e": 13050, "text": "One more night"},
+                     {"t": 15480, "e": 18240, "text": "One more round"},
+                     {"t": 18540, "text": ""},                       # 7.7 с без пения — ♪
+                     {"t": 26000, "e": 27300, "text": "Late line"}]
+
+
+def test_netease_yrc_wins_over_lrclib_line_timing():
+    def handler(req):
+        if req.url.path == "/api/get":
+            return httpx.Response(200, json=dict(LRCLIB_HIT, syncedLyrics="[00:09.93]One more might\n[00:14.61]x\n"))
+        if req.url.path == "/api/search":
+            return httpx.Response(200, json=[])
+        if req.url.path == "/api/cloudsearch/pc":
+            return httpx.Response(200, json={"result": {"songs": [
+                {"id": 508052774, "name": "Plastic Love", "ar": [{"name": "Mariya Takeuchi"}], "dt": 294000}]}})
+        if req.url.path == "/api/song/lyric/v1":
+            return httpx.Response(200, json={"lrc": {"lyric": "[00:11.46]One more night\n[00:15.03]One more round\n"},
+                                             "yrc": {"lyric": YRC}})
+        return httpx.Response(404)
+    res = find_with(handler)
+    lyr = res["lyrics"]
+    assert lyr["source"] == "netease" and lyr["timing"] == "word" and res["meta"]["timing"] == "word"
+    assert lyr["lines"][0] == {"t": 10740, "e": 13050, "text": "One more night"}

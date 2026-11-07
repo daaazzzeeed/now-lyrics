@@ -10,8 +10,8 @@ from typing import Awaitable, Callable
 import httpx
 
 from . import config as C
-from .lrc import (CJK_ANY, attach, clean_title, has_translit, lyrics_from_lrc, lyrics_lang, netease_duration, norm,
-                  parse_lrc, pick_lrclib, pick_netease)
+from .lrc import (CJK_ANY, add_gaps, attach, clean_title, copy_translit_by_text, has_translit, lyrics_from_lrc,
+                  lyrics_lang, netease_duration, norm, parse_lrc, parse_yrc, pick_lrclib, pick_netease)
 
 log = logging.getLogger("sources")
 
@@ -111,18 +111,34 @@ async def netease_songs(client: httpx.AsyncClient, info: dict) -> list[dict]:
 
 
 async def netease_lyrics(client: httpx.AsyncClient, sid, dur_ms: int | None) -> dict | None:
-    js = _json(await request(client, "GET", f"{C.NETEASE_BASE}/api/song/lyric",
-                             params={"id": sid, "lv": -1, "kv": -1, "tv": -1, "rv": -1}, headers=NE_HEADERS))
+    """Текст NetEase: v1 отдаёт и yrc (таймкоды по словам), и romalrc; старый эндпоинт — запасной."""
+    js = _json(await request(client, "GET", f"{C.NETEASE_BASE}/api/song/lyric/v1", headers=NE_HEADERS,
+                             params={"id": sid, "cp": "false", "lv": 0, "kv": 0, "tv": 0, "rv": 0, "yv": 0,
+                                     "ytv": 0, "yrv": 0}))
+    if not isinstance(js, dict) or not isinstance(js.get("lrc"), dict):
+        js = _json(await request(client, "GET", f"{C.NETEASE_BASE}/api/song/lyric",
+                                 params={"id": sid, "lv": -1, "kv": -1, "tv": -1, "rv": -1}, headers=NE_HEADERS))
     if not isinstance(js, dict) or js.get("nolyric") or js.get("uncollected") or js.get("pureMusic"):
         return None
-    lrc = js.get("lrc") if isinstance(js.get("lrc"), dict) else {}
-    lyr = lyrics_from_lrc(lrc.get("lyric") or "", "", "netease")
+
+    def part(key: str) -> str:
+        v = js.get(key)
+        return (v.get("lyric") or "") if isinstance(v, dict) else ""
+
+    lyr = lyrics_from_lrc(part("lrc"), "", "netease")
     if not lyr:
         return None
-    if lyr["synced"]:
-        roma = js.get("romalrc") if isinstance(js.get("romalrc"), dict) else {}
-        if roma.get("lyric"):
-            attach(lyr["lines"], parse_lrc(roma["lyric"])[0], "translit")
+    roma = parse_lrc(part("romalrc"))[0] if lyr["synced"] and part("romalrc") else []
+    if roma:
+        attach(lyr["lines"], roma, "translit")
+    words = parse_yrc(part("yrc"))
+    if lyr["synced"] and len(words) >= max(2, 0.6 * sum(1 for ln in lyr["lines"] if ln["text"])):
+        # таймкоды по словам: строка загорается, когда её начинают петь; в длинных паузах — ♪
+        copy_translit_by_text(words, lyr["lines"])
+        if roma:
+            attach(words, roma, "translit", tolerance=1500)
+        lyr["lines"] = add_gaps(words)
+        lyr["timing"] = "word"
     lyr["source_id"] = str(sid)
     lyr["duration_ms"] = dur_ms or None
     return lyr
@@ -167,8 +183,9 @@ async def find_lyrics(client: httpx.AsyncClient, info: dict, override: dict | No
                       on_lrclib: Callable[[dict], Awaitable[None] | None] | None = None) -> dict:
     """→ {"lyrics", "definitive", "meta", "candidates"}.
 
+    LRCLIB и NetEase спрашиваются параллельно. Приоритет: NetEase с таймкодами по словам (yrc),
+    затем синхронизированный LRCLIB; NetEase — если в LRCLIB пусто или там нет транслитерации.
     definitive=False — какой-то источник был недоступен: «не найдено» кэшировать нельзя.
-    on_lrclib(lyrics) вызывается, как только LRCLIB вернул текст (чтобы заранее начать транслитерацию).
     """
     override = override or {}
     stages: dict[str, int] = {}
@@ -190,39 +207,42 @@ async def find_lyrics(client: httpx.AsyncClient, info: dict, override: dict | No
         return {"lyrics": lyr, "definitive": ok or lyr is not None, "candidates": [],
                 "meta": _meta(lyr, info, stages, pinned=True)}
 
-    lyr = None
-    try:
-        lyr, c = await lrclib_stage(client, info)
+    async def stage(name: str, fn):
+        try:
+            res = await fn(client, info)
+        except SourceDown as e:
+            log.info("%s недоступен: %s", name, e)
+            res = e
+        except Exception as e:  # noqa: BLE001 — неожиданный формат ответа: не теряем остальное
+            log.exception("%s: неожиданный ответ", name)
+            res = e
+        mark(name)
+        return res
+
+    # оба источника параллельно: NetEase нужен и для английских треков — у него бывают таймкоды по словам
+    r_lrc, r_ne = await asyncio.gather(stage("lrclib", lrclib_stage), stage("netease", netease_stage))
+    lyr = ne = None
+    if isinstance(r_lrc, Exception):
+        ok = False
+    else:
+        lyr, c = r_lrc
         cands += c
-    except SourceDown as e:
-        log.info("LRCLIB недоступен: %s", e)
+    if isinstance(r_ne, Exception):
         ok = False
-    except Exception:  # noqa: BLE001 — неожиданный формат ответа: не теряем остальное
-        log.exception("LRCLIB: неожиданный ответ")
-        ok = False
-    mark("lrclib")
+    else:
+        ne, c = r_ne
+        cands += c
     if lyr and on_lrclib:
         res = on_lrclib(lyr)
         if asyncio.iscoroutine(res):
             await res
-
-    if lyr is None or not lyr["synced"] or is_asian(info, lyr):
-        ne = None
-        try:
-            ne, c = await netease_stage(client, info)
-            cands += c
-        except SourceDown as e:
-            log.info("NetEase недоступен: %s", e)
-            ok = False
-        except Exception:  # noqa: BLE001
-            log.exception("NetEase: неожиданный ответ")
-            ok = False
-        mark("netease")
-        lang = lyrics_lang(ne)
-        if ne and (lyr is None
-                   or (not lyr["synced"] and ne["synced"])
-                   or (lang in ("ja", "ko", "zh") and has_translit(ne) and not has_translit(lyr))):
-            lyr = ne
+    lang = lyrics_lang(ne)
+    if ne and (lyr is None
+               or ne.get("timing") == "word"                      # точнее по времени — берём
+               or (not lyr["synced"] and ne["synced"])
+               or (lang in ("ja", "ko", "zh") and has_translit(ne) and not has_translit(lyr))
+               or (is_asian(info, lyr) and ne["synced"] and lyr["synced"] and has_translit(ne))):
+        lyr = ne
     return {"lyrics": lyr, "definitive": ok or lyr is not None, "candidates": cands,
             "meta": _meta(lyr, info, stages)}
 
@@ -230,5 +250,6 @@ async def find_lyrics(client: httpx.AsyncClient, info: dict, override: dict | No
 def _meta(lyr: dict | None, info: dict, stages: dict, pinned: bool = False) -> dict:
     rec = (lyr or {}).get("duration_ms")
     return {"source": (lyr or {}).get("source"), "source_id": (lyr or {}).get("source_id"),
+            "timing": (lyr or {}).get("timing", "line") if lyr else None,
             "record_ms": rec, "spotify_ms": info["duration_ms"],
             "diff_ms": (info["duration_ms"] - rec) if rec else None, "pinned": pinned, "stages_ms": stages}

@@ -84,6 +84,59 @@ def parse_lrc(text: str) -> tuple[list[dict], list[str]]:
     return merged, plain
 
 
+YRC_LINE = re.compile(r"^\[(\d+),(\d+)\](.*)$")
+YRC_WORD = re.compile(r"\((\d+),(\d+),\d+\)")
+GAP_MS = 4000  # пауза между концом строки и началом следующей — показываем ♪
+
+
+def parse_yrc(text: str) -> list[dict]:
+    """NetEase yrc (по словам): «[10740,4680](10740,510,0)One (11250,480,0)more…» → [{t, e, text}].
+
+    t — начало первого слова (когда строку реально начинают петь), e — конец последнего.
+    """
+    out = []
+    for raw in (text or "").splitlines():
+        m = YRC_LINE.match(raw.strip())
+        if not m:
+            continue  # JSON-строки с титрами и мусор
+        start, dur, body = int(m.group(1)), int(m.group(2)), m.group(3)
+        words = YRC_WORD.findall(body)
+        line = re.sub(r"\s{2,}", " ", YRC_WORD.sub("", body)).strip()
+        if not line or is_credit(line, start):
+            continue
+        t = int(words[0][0]) if words else start
+        e = max((int(a) + int(b) for a, b in words), default=start + dur)
+        out.append({"t": t, "e": max(e, t), "text": line})
+    out.sort(key=lambda x: x["t"])
+    return out
+
+
+def add_gaps(lines: list[dict], gap_ms: int = GAP_MS) -> list[dict]:
+    """Между строками с известным концом вставляет паузу (♪), если петь не будут хотя бы gap_ms."""
+    out: list[dict] = []
+    for i, ln in enumerate(lines):
+        out.append(ln)
+        nxt = lines[i + 1] if i + 1 < len(lines) else None
+        if ln.get("text") and "e" in ln and nxt and nxt.get("text") and nxt["t"] - ln["e"] >= gap_ms:
+            out.append({"t": ln["e"] + 300, "text": ""})
+    return out
+
+
+def copy_translit_by_text(dst: list[dict], src: list[dict], window_ms: int = 4000) -> None:
+    """Транслитерация из строк LRC (к ним приклеен romalrc) в строки yrc: тот же текст, рядом по времени."""
+    by_text: dict[str, list[dict]] = {}
+    for ln in src:
+        if ln.get("translit"):
+            by_text.setdefault(norm(ln["text"]), []).append(ln)
+    for ln in dst:
+        cands = by_text.get(norm(ln.get("text", "")))
+        if ln.get("translit") or not cands:
+            continue
+        best = min(cands, key=lambda c: abs(c["t"] - ln["t"]))
+        if abs(best["t"] - ln["t"]) <= window_ms:
+            ln["translit"] = best["translit"]
+
+
 def lyrics_from_lrc(synced_text: str, plain_text: str, source: str) -> dict | None:
     """Синхронизированный текст, если он есть, иначе обычный. «纯音乐» — инструментал → None."""
     lines, plain = parse_lrc(synced_text) if synced_text else ([], [])
@@ -271,13 +324,20 @@ def pick_lrclib(items: list, dur_ms: int, album: str = "") -> dict | None:
     return good[0][1] if good else None
 
 
+def _scripts_differ(a: list[str], b: list[str]) -> bool:
+    """«Mariya Takeuchi» и «竹内まりや» не сравнить по буквам — тогда хватит совпадения названия."""
+    def latin(names: list[str]) -> bool:
+        return any(re.search(r"[a-z]", n) for n in names) and not any(CJK_ANY.search(n) for n in names)
+    return latin(a) != latin(b)
+
+
 def netease_duration(song: dict) -> int:
     return int(song.get("duration") or song.get("dt") or 0)
 
 
 def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int, album: str = "") -> dict | None:
-    """NetEase: длительность ±2 с и совпал артист или название; ближе по длительности лучше,
-    при равенстве — артист, альбом, название."""
+    """NetEase: длительность ±2 с и совпал артист (название без артиста — только если имена в разных
+    письменностях); ближе по длительности лучше, при равенстве — артист, альбом, название."""
     want_t = norm(clean_title(title))
     want_a = [norm(a) for a in artists if norm(a)]
     want_album = norm(album)
@@ -293,8 +353,8 @@ def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int, album
         a_ok = any(a and (a in b or b in a) for a in names for b in want_a)
         t = norm(song.get("name", ""))
         t_ok = bool(t and want_t) and (t == want_t or t in want_t or want_t in t)
-        if not (a_ok or t_ok):
-            continue
+        if not a_ok and not (t_ok and _scripts_differ(names, want_a)):
+            continue  # тот же трек у другого латинского артиста — почти всегда кавер
         alb = norm(((song.get("album") or song.get("al") or {}) or {}).get("name", ""))
         album_ok = bool(want_album and alb and (alb == want_album or want_album in alb or alb in want_album))
         good.append(((round(diff / 500), not a_ok, not album_ok, not t_ok, diff), song))
