@@ -185,14 +185,24 @@ body.paused .paused-chip { opacity: 1; }
   opacity: .9;
 }
 .line.active .r { opacity: .95; }
+.line .tl {
+  margin-top: .4vh;
+  font-size: 2.6vh; font-weight: 500;
+  line-height: 1.2; letter-spacing: 0;
+  opacity: .7;
+}
+.line.active .tl { opacity: .85; }
 .line.past { color: var(--ink-past); }
 .line.active { color: var(--ink-active); }
 .line.note { font-size: 4.4vh; }
 .line.note.active { animation: breathe 1.8s ease-in-out infinite; }
 @keyframes breathe { 50% { opacity: .45; } }
 
-.lines.plain .line { font-size: 4.3vh; color: rgba(255, 255, 255, .9); margin-bottom: 1.6vh; }
-.lines.plain .gap { height: 3vh; }
+.lines.plain .line { font-size: 3.5vh; color: rgba(255, 255, 255, .92); margin-bottom: 1.3vh; }
+.lines.plain .line .r { font-size: 2.5vh; }
+.lines.plain .line .tl { font-size: 2.2vh; }
+.lines.plain { transition: transform 1.2s var(--ease); }
+.lines.plain .gap { height: 2.2vh; }
 
 .lines.loading { padding-top: 6vh; }
 .sk {

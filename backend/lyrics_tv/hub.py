@@ -17,20 +17,24 @@ import httpx
 from . import config as C
 from .cache import Cache
 from .demo import DemoPlayer
-from .fonts import font_url
-from .lrc import (LANGS, adjust, detect_lang, has_translit, lyrics_lang, needs_translit, norm,
-                  promote_sub_to_translit)
+from .fonts import font_urls
+from .lrc import LANGS, LYRICS_REV, adjust, detect_lang, han_lang, has_translit, lyrics_lang, needs_translit, \
+    promote_sub_to_translit
 from .media import DEFAULT_PALETTE, compute_palette, ensure_cover, fallback_palette, palette_fresh
 from .sources import find_lyrics, lrclib_stage, netease_stage
 from .spotify import AuthRequired, RateLimited, Spotify, parse_item
-from .translit import TranslitFailed, fill, gemini, phases
+from .translate import carry_over, fill_translation, needs_translation
+from .translit import fill
 
 log = logging.getLogger("hub")
 
 STALE_S = 20
 TRANSLIT_RETRY_S = (0, 20, 60)   # Gemini бывает перегружен — повторяем, пока трек играет
+TRANSLATE_RETRY_S = (0, 30, 120)
 WATCHDOG_S = 20                  # столько ждём в loading, затем один перезапуск поиска, затем none
 PREFETCH_DELAY_S = 3
+START_WINDOW_MS = 60_000      # до этой позиции трека ждём поправку от колонки
+LAG_MIN_MS, LAG_MAX_MS = 800, 5000
 
 
 def dumps(msg: dict) -> str:
@@ -59,6 +63,12 @@ class Hub:
         self.playing = False
         self.paused_since: float | None = None
         self.auth_days: int | None = None
+        self.drift: list[int] = []   # последние расхождения progress Spotify с ожидаемым (для /debug/track)
+        # В начале трека Spotify считает, что звук уже идёт, а колонка (WiiM) ещё буферизует; секунд через
+        # 30 приходит поправка назад на ~2.5 с. Эту задержку выучиваем и вычитаем до поправки.
+        self.start_lag = int(cache.get_kv("start_lag_ms") or 0) if not demo else 0
+        self.lag_fixed = True
+        self.raw_pos, self.raw_mono = 0, time.monotonic()
         self.track_tasks: set[asyncio.Task] = set()   # задачи текущего поколения
         self.pipeline: asyncio.Task | None = None
         self.inflight: dict[str, asyncio.Task] = {}   # предзагрузка следующих треков
@@ -87,7 +97,7 @@ class Hub:
             track = {k: self.track[k] for k in ("id", "title", "album", "duration_ms")}
             track["artists"] = ", ".join(self.track["artists"])
             track["cover"] = f"/cover/{self.track['id']}.jpg"
-            track["font"] = font_url(self.track, self.raw, self.lang)
+            track["fonts"] = font_urls(self.track, self.raw, self.lang)
         return {
             "t": "state", "status": "connecting" if stale else self.status, "track": track,
             "lyrics": self.lyrics, "lyrics_state": self.lyrics_state, "palette": self.palette,
@@ -150,9 +160,11 @@ class Hub:
         if not self.demo and not self.spotify.configured:
             self.set_status("setup")
             return 30.0
+        sent = time.monotonic()
         js = await (self.demo or self.spotify).player()
         now = time.monotonic()
         self.last_tick = now
+        measured = sent + (now - sent) / 2  # progress_ms соответствует середине запроса, а не его концу
         days = None if self.demo else self.spotify.days_left()
         days_changed = days != self.auth_days
         self.auth_days = days
@@ -166,7 +178,31 @@ class Hub:
         playing = bool(js.get("is_playing"))
         progress = int(js.get("progress_ms") or 0)
         before = self.status
-        self.pos, self.pos_mono, self.playing = progress, now, playing
+        same = bool(self.track) and self.track["id"] == info["id"]
+        if not same:
+            self.lag_fixed = False  # новый трек: Spotify снова «забежит вперёд», пока колонка буферизует
+        elif playing and self.playing:
+            drift = progress - int(self.raw_pos + (measured - self.raw_mono) * 1000)
+            self.drift.append(drift)
+            del self.drift[:-20]
+            if abs(drift) > 1000:
+                log.info("Spotify: позиция разошлась с ожидаемой на %d мс", drift)
+            if not self.lag_fixed and -LAG_MAX_MS < drift < -LAG_MIN_MS and progress < START_WINDOW_MS + 15_000:
+                self.lag_fixed = True  # колонка доложила настоящую позицию — учимся на этой поправке
+                if not self.demo:
+                    self.start_lag = round(0.7 * self.start_lag + 0.3 * -drift) if self.start_lag else -drift
+                    self.cache.set_kv("start_lag_ms", self.start_lag)
+                    log.info("задержка старта колонки: %d мс (поправка %d мс)", self.start_lag, drift)
+            elif abs(drift) > LAG_MAX_MS:
+                self.lag_fixed = True  # перемотка
+        if not self.lag_fixed and progress >= START_WINDOW_MS:
+            self.lag_fixed = True  # поправки не было — наша оценка, видимо, велика
+            if self.start_lag and not self.demo:
+                self.start_lag = round(self.start_lag * 0.8)
+                self.cache.set_kv("start_lag_ms", self.start_lag)
+        self.raw_pos, self.raw_mono = progress, measured
+        lag = 0 if self.lag_fixed else self.start_lag
+        self.pos, self.pos_mono, self.playing = max(0, progress - lag), measured, playing
         if playing:
             self.paused_since = None
         elif self.paused_since is None:
@@ -218,8 +254,8 @@ class Hub:
         return lyrics_lang(raw) or detect_lang([info["title"], *info["artists"]])
 
     @staticmethod
-    def _translit_pending(raw: dict | None, lang: str | None) -> bool:
-        return bool(raw) and lang in LANGS and any(needs_translit(ln, lang) for ln in raw["lines"])
+    def _translit_pending(raw: dict | None, lang: str | None = None) -> bool:
+        return bool(raw) and any(needs_translit(ln) for ln in raw["lines"])
 
     # ── новый трек ──
     def new_track(self, info: dict) -> None:
@@ -236,14 +272,15 @@ class Hub:
         self.raw, self.meta = cached.get("lyrics"), cached.get("meta")
         self.lang = self._lang_for(info, self.raw, self.override)
         fetch = not self.raw and time.time() - cached.get("checked", 0) > C.NEGATIVE_RETRY_S
+        fetch = fetch or (bool(cached.get("stale")) and bool(self.raw))  # старый кэш: показываем и ищем заново
         prefetching = tid in self.inflight
         self.lyrics_state = "ready" if self.raw else ("loading" if fetch or prefetching else "none")
         self._present()
-        translit = not cached.get("translit_done") and self._translit_pending(self.raw, self.lang)
+        translit = self._translit_pending(self.raw, self.lang)
         log.info("смена трека gen=%d %s: %s — %s; кэш: текст %s, палитра %s%s", gen, tid, ", ".join(info["artists"]),
                  info["title"], "да" if self.raw else ("—" if fetch else "«нет»"), "да" if fresh_pal else "—",
                  "; готовится заранее" if prefetching else "")
-        if fetch or translit or prefetching:
+        if fetch or translit or prefetching or needs_translation(self.raw):
             self.pipeline = self._spawn(self._pipeline(info, gen, fetch, translit))
         if not fresh_pal:
             self._spawn(self._palette(info, gen))
@@ -283,7 +320,7 @@ class Hub:
             self.palette = pal
             self.push_state()
 
-    # ── конвейер текста: поиск → показать сразу → транслитерация двумя фазами ──
+    # ── конвейер текста: поиск → показать сразу → транслитерация (локально, Gemini — запасной) ──
     async def _pipeline(self, info: dict, gen: int | None, fetch: bool, translit: bool,
                         wait_prefetch: bool = True) -> None:
         """gen=None — предзагрузка: только кэш, без отправки клиентам."""
@@ -306,60 +343,71 @@ class Hub:
                 self._present()
                 self.push_state()
                 log.info("%s: взят из предзагрузки, клиенту ушёл lyrics_state=%s", tag, self.lyrics_state)
-            translit = not cached.get("translit_done") and self._translit_pending(
+            translit = self._translit_pending(
                 cached.get("lyrics"), self._lang_for(info, cached.get("lyrics"), override))
 
+        if fetch:
+            raw = await self._find(info, gen, tag, override, (self.cache.get(tid) or {}).get("lyrics"))
+        elif translit or needs_translation((self.cache.get(tid) or {}).get("lyrics")):
+            raw = (self.cache.get(tid) or {}).get("lyrics")
+        else:
+            return
+        if not raw:
+            return
+        if not self._translit_pending(raw):
+            self.cache.update(tid, translit_done=True)
+        # транслитерация и перевод независимы — параллельно, каждый досылает своё на экран
+        await asyncio.gather(self._translit_stage(info, gen, tag, raw, override),
+                             self._translation_stage(info, gen, tag, raw, override))
+
+    def _progress(self, tid: str, gen: int | None, raw: dict) -> None:
+        self.cache.update(tid, lyrics=raw)
+        if self._live(tid, gen):
+            self.raw = raw
+            self._present()
+            self.push_state()
+
+    async def _translit_stage(self, info: dict, gen: int | None, tag: str, raw: dict, override: dict) -> None:
+        tid = info["id"]
+        if not self._translit_pending(raw):
+            return
+        han = han_lang(raw, override.get("lang"))
         known: dict[str, str] = {}
-        early: list[asyncio.Task] = []
-        try:
-            if fetch:
-                raw = await self._find(info, gen, tag, override, known, early)
-            elif translit:
-                raw = (self.cache.get(tid) or {}).get("lyrics")
-            else:
-                return
-            lang = self._lang_for(info, raw, override)
-            if not self._translit_pending(raw, lang):
-                if raw:
-                    self.cache.update(tid, translit_done=True)
-                return
-            for task in early:  # ранний запрос по тексту LRCLIB — его ответы годятся и для NetEase
-                with contextlib.suppress(Exception):
-                    await task
-
-            def progress() -> None:
-                self.cache.update(tid, lyrics=raw)
-                if live():
-                    self.raw = raw
-                    self._present()
-                    self.push_state()
-
-            pos = (lambda: self.position() + C.OFFSET_MS) if gen is not None else (lambda: 0)
-            t0 = time.monotonic()
-            for pause in (TRANSLIT_RETRY_S if gen is not None else (0,)):
-                if pause:
-                    await asyncio.sleep(pause)
-                    if not live():
-                        return
-                if await fill(self.client, raw, lang, pos, known, progress):
-                    self.cache.update(tid, lyrics=raw, translit_done=True)
-                    log.info("%s: транслитерация (%s) готова за %d мс", tag, lang, (time.monotonic() - t0) * 1000)
+        t0 = time.monotonic()
+        for pause in (TRANSLIT_RETRY_S if gen is not None else (0,)):
+            if pause:
+                await asyncio.sleep(pause)
+                if not self._live(tid, gen):
                     return
-            log.info("%s: транслитерация не удалась — повтор при следующем появлении трека", tag)
-        finally:
-            for task in early:
-                task.cancel()
+            if await fill(self.client, raw, han, known, lambda: self._progress(tid, gen, raw)):
+                self.cache.update(tid, lyrics=raw, translit_done=True)
+                log.info("%s: транслитерация (%s) готова за %d мс", tag, han, (time.monotonic() - t0) * 1000)
+                return
+        log.info("%s: транслитерация не удалась — повтор при следующем появлении трека", tag)
 
-    async def _find(self, info: dict, gen: int | None, tag: str, override: dict, known: dict,
-                    early: list) -> dict | None:
+    async def _translation_stage(self, info: dict, gen: int | None, tag: str, raw: dict, override: dict) -> None:
+        if not needs_translation(raw):
+            return
+        lang = override.get("lang") if override.get("lang") in LANGS else lyrics_lang(raw)
+        t0 = time.monotonic()
+        for pause in (TRANSLATE_RETRY_S if gen is not None else (0,)):
+            if pause:
+                await asyncio.sleep(pause)  # Google мог временно ограничить (429) — пробуем ещё, пока трек играет
+                if not self._live(info["id"], gen):
+                    return
+            if await fill_translation(self.client, raw, lang):
+                self._progress(info["id"], gen, raw)
+                log.info("%s: перевод (%s → %s) %s за %d мс", tag, lang or "авто", C.TRANSLATE_TO,
+                         f"не нужен ({raw.get('translation_skip')})" if raw.get("translation_skip") else "готов",
+                         (time.monotonic() - t0) * 1000)
+                return
+        log.info("%s: перевод не удался — повтор при следующем появлении трека", tag)
+
+    async def _find(self, info: dict, gen: int | None, tag: str, override: dict, old: dict | None = None
+                    ) -> dict | None:
         tid = info["id"]
         t0 = time.monotonic()
         log.info("%s: поиск текста начат", tag)
-
-        def on_lrclib(lyr: dict) -> None:
-            lang = override.get("lang") or lyrics_lang(lyr)
-            if lang in LANGS and C.GEMINI_API_KEY and any(needs_translit(ln, lang) for ln in lyr["lines"]):
-                early.append(asyncio.create_task(self._early_translit(lyr, lang, known, gen, tag)))
 
         if self.demo:
             raw = self.demo.lyrics(tid)
@@ -368,7 +416,7 @@ class Hub:
                             "spotify_ms": info["duration_ms"], "diff_ms": 0, "pinned": False, "stages_ms": {}}}
         else:
             try:
-                res = await find_lyrics(self.client, info, override, on_lrclib)
+                res = await find_lyrics(self.client, info, override)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -377,6 +425,11 @@ class Hub:
         raw, meta = res["lyrics"], res["meta"]
         if raw:
             promote_sub_to_translit(raw)
+            raw["rev"] = LYRICS_REV
+        if old and not raw:
+            raw, meta = old, (self.cache.get(tid) or {}).get("meta")  # повторный поиск ничего не дал — оставляем
+        elif old and raw:
+            raw = carry_over(old, raw)  # тот же источник — берём старое целиком, иначе переносим перевод
         if raw or res["definitive"]:  # таймауты и 5xx «не найдено» не кэшируют
             self.cache.update(tid, lyrics=raw, meta=meta, checked=time.time(), translit_done=False)
         m = meta or {}
@@ -392,22 +445,6 @@ class Hub:
             self.push_state()
             log.info("%s: клиенту ушёл lyrics_state=%s", tag, self.lyrics_state)
         return raw
-
-    async def _early_translit(self, lyr: dict, lang: str, known: dict, gen: int | None, tag: str) -> None:
-        """Пока ищем в NetEase, транслитерируем ближайшие строки найденного в LRCLIB текста."""
-        lines = lyr["lines"]
-        todo = [i for i, ln in enumerate(lines) if needs_translit(ln, lang)]
-        parts = phases(lines, todo, self.position() + C.OFFSET_MS if gen is not None else 0, lyr.get("synced", False))
-        if not parts:
-            return
-        try:
-            out = await gemini(self.client, lang, [lines[i]["text"] for i in parts[0]])
-        except TranslitFailed as e:
-            log.info("%s: ранний запрос к Gemini не удался: %s", tag, e)
-            return
-        for i, r in zip(parts[0], out):
-            if r:
-                known[norm(lines[i]["text"])] = r
 
     # ── предзагрузка следующего трека из очереди ──
     async def _prefetch_next(self, gen: int) -> None:
@@ -427,9 +464,9 @@ class Hub:
         cached = self.cache.get(nxt["id"]) or {}
         fetch = not cached.get("lyrics") and time.time() - cached.get("checked", 0) > C.NEGATIVE_RETRY_S
         lang = self._lang_for(nxt, cached.get("lyrics"), self.cache.override(nxt["id"], nxt["artists"]))
-        translit = not cached.get("translit_done") and self._translit_pending(cached.get("lyrics"), lang)
+        translit = self._translit_pending(cached.get("lyrics"), lang)
         pal = not palette_fresh(cached.get("palette"))
-        if not (fetch or translit or pal):
+        if not (fetch or translit or pal or needs_translation(cached.get("lyrics"))):
             return
         log.info("готовлю заранее следующий трек %s: %s — %s", nxt["id"], ", ".join(nxt["artists"]), nxt["title"])
 
@@ -481,7 +518,8 @@ class Hub:
             return out
         out.update(lyrics_state=self.lyrics_state, lang=self.lang, meta=self.meta, override=self.override,
                    adj=(self.lyrics or {}).get("adj"), lines=len((self.raw or {}).get("lines", [])),
-                   translit=has_translit(self.raw), position_ms=self.position(), preparing=sorted(self.inflight))
+                   translit=has_translit(self.raw), position_ms=self.position(), preparing=sorted(self.inflight),
+                   spotify_drift_ms=self.drift[-10:], start_lag_ms=self.start_lag, lag_fixed=self.lag_fixed)
         if self.demo:
             return out
         cands: list = []

@@ -8,7 +8,8 @@ from pathlib import Path
 
 from .lrc import migrate
 
-VERSION = 1
+VERSION = 3  # 3: защита от каверов NetEase, NetEase для азиатской музыки, romalrc → hint
+STALE_VERSIONS = (2,)  # такие записи показываются сразу, а текст ищется заново в фоне
 OVERRIDE_FIELDS = ("offset_ms", "source", "source_id", "lang")
 
 
@@ -21,14 +22,25 @@ class Cache:
         # key: "track:<spotify id>" или "artist:<имя>"; поля NULL — «не задано»
         self.db.execute("CREATE TABLE IF NOT EXISTS overrides (key TEXT PRIMARY KEY, offset_ms INTEGER, "
                         "source TEXT, source_id TEXT, lang TEXT, updated INTEGER)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        self.db.commit()
+
+    def get_kv(self, key: str):
+        row = self.db.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def set_kv(self, key: str, value) -> None:
+        self.db.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, json.dumps(value)))
         self.db.commit()
 
     # ── кэш трека ──
     def get(self, tid: str) -> dict | None:
         row = self.db.execute("SELECT data FROM track WHERE id = ?", (tid,)).fetchone()
         data = json.loads(row[0]) if row else None
-        if not isinstance(data, dict) or data.get("v") != VERSION:
+        if not isinstance(data, dict) or data.get("v") not in (VERSION, *STALE_VERSIONS):
             return None
+        if data.get("v") != VERSION:
+            data["stale"] = True  # показать сразу, но поискать текст заново по новым правилам
         migrate(data.get("lyrics"))
         if "romaji_done" in data:  # старое имя флага
             data.setdefault("translit_done", data.pop("romaji_done"))
@@ -36,6 +48,7 @@ class Cache:
 
     def put(self, tid: str, data: dict) -> None:
         data = dict(data, v=VERSION)
+        data.pop("stale", None)
         self.db.execute("INSERT OR REPLACE INTO track (id, data, updated) VALUES (?, ?, ?)",
                         (tid, json.dumps(data, ensure_ascii=False), int(time.time())))
         self.db.commit()

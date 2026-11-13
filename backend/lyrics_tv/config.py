@@ -40,6 +40,9 @@ GEMINI_API_KEY = env("GEMINI_API_KEY")
 GEMINI_MODELS = [m.strip() for m in env("GEMINI_MODEL", "gemini-flash-latest").split(",") if m.strip()]
 GEMINI_MODEL = GEMINI_MODELS[0] if GEMINI_MODELS else "gemini-flash-latest"
 OFFSET_MS = int(env("LYRICS_OFFSET_MS", "250"))
+# перевод неанглийских песен: язык (пусто — выключить), DeepL по желанию, иначе Google без ключа
+TRANSLATE_TO = env("TRANSLATE_TO", "ru").strip().lower()
+DEEPL_API_KEY = env("DEEPL_API_KEY")
 IDLE_AFTER_S = int(env("IDLE_AFTER_S", "180"))
 DATA_DIR = Path(env("DATA_DIR", str(BASE / "data")))
 DEMO = env("DEMO", "0") == "1"
@@ -51,6 +54,9 @@ SPOTIFY_API = env("SPOTIFY_API_BASE", "https://api.spotify.com/v1")
 LRCLIB_BASE = env("LRCLIB_BASE", "https://lrclib.net")
 NETEASE_BASE = env("NETEASE_BASE", "https://music.163.com")
 GEMINI_BASE = env("GEMINI_BASE", "https://generativelanguage.googleapis.com")
+DEEPL_BASE = env("DEEPL_BASE", "https://api-free.deepl.com")
+GOOGLE_TRANSLATE_BASE = env("GOOGLE_TRANSLATE_BASE", "https://translate.googleapis.com")
+GOOGLE_DICT_BASE = env("GOOGLE_DICT_BASE", "https://clients5.google.com")
 # Noto Sans CJK Bold (OFL): {FONT_BASE}/JP/NotoSansJP-Bold.otf и т.д.
 FONT_BASE = env("FONT_BASE", "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/SubsetOTF")
 

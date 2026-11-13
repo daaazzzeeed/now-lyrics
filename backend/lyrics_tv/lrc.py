@@ -13,6 +13,8 @@ CREDIT = re.compile(
     r"^\s*(作词|作詞|作曲|编曲|編曲|制作人|製作|制作|混音|母带|和声|吉他|贝斯|鼓|钢琴|弦乐|录音|監製|监制|"
     r"出品|发行|企划|统筹|演唱|原唱|词|曲|lyrics?(\s+by)?|composed\s+by|composer|arranged\s+by|"
     r"arranger|produced\s+by|producer|written\s+by)\s*[:：]", re.I)
+CREDIT_CJK = re.compile(r"^\s*[\u4e00-\u9fff]{1,6}\s*[:：]")  # 录制：粒粒, 混音：龙龙, 和声编写：…
+RULE_LINE = re.compile(r"^[-—_=~*·.\s]{3,}$")
 PURE_MUSIC = re.compile(r"纯音乐|請欣賞|请欣赏")
 KANA = re.compile(r"[぀-ゟ゠-ヿㇰ-ㇿｦ-ﾟ]")
 JP_TEXT = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
@@ -20,6 +22,7 @@ CJK_ANY = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ가-힯]")
 HAN = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 HANGUL = re.compile(r"[가-힯ᄀ-ᇿ㄰-㆏]")
 # частые иероглифы, которые в традиционном и упрощённом письме различаются
+YUE_CHARS = set("嘅咗佢唔冇喺嚟哋啲乜嘢咁囉吖嗰噉揾搵睇俾畀攞啱咩喇嚿冧氹㗎嘞嚟噃哂諗瞓攰")
 TRAD_ONLY = set("們個來說時會為這國對還過愛裡樣點開關問發讓聽見風車東書長門當實現經學無與後動體從頭將麼話歲夢淚邊總離誰顏戀聲憶")
 SIMP_ONLY = set("们个来说时会为这国对还过爱里样点开关问发让听见风车东书长门当实现经学无与后动体从头将么话岁梦泪边总离谁颜恋声忆")
 
@@ -33,7 +36,9 @@ LANGS = ("ja", "ko", "zh", "yue")
 
 
 def is_credit(text: str, t: int) -> bool:
-    return bool(text) and t < CREDIT_WINDOW_MS and bool(CREDIT.match(text))
+    if not text or t >= CREDIT_WINDOW_MS:
+        return False
+    return bool(CREDIT.match(text) or CREDIT_CJK.match(text) or RULE_LINE.match(text))
 
 
 def parse_lrc(text: str) -> tuple[list[dict], list[str]]:
@@ -77,6 +82,59 @@ def parse_lrc(text: str) -> tuple[list[dict], list[str]]:
             continue
         merged.append(ln)
     return merged, plain
+
+
+YRC_LINE = re.compile(r"^\[(\d+),(\d+)\](.*)$")
+YRC_WORD = re.compile(r"\((\d+),(\d+),\d+\)")
+GAP_MS = 4000  # пауза между концом строки и началом следующей — показываем ♪
+
+
+def parse_yrc(text: str) -> list[dict]:
+    """NetEase yrc (по словам): «[10740,4680](10740,510,0)One (11250,480,0)more…» → [{t, e, text}].
+
+    t — начало первого слова (когда строку реально начинают петь), e — конец последнего.
+    """
+    out = []
+    for raw in (text or "").splitlines():
+        m = YRC_LINE.match(raw.strip())
+        if not m:
+            continue  # JSON-строки с титрами и мусор
+        start, dur, body = int(m.group(1)), int(m.group(2)), m.group(3)
+        words = YRC_WORD.findall(body)
+        line = re.sub(r"\s{2,}", " ", YRC_WORD.sub("", body)).strip()
+        if not line or is_credit(line, start):
+            continue
+        t = int(words[0][0]) if words else start
+        e = max((int(a) + int(b) for a, b in words), default=start + dur)
+        out.append({"t": t, "e": max(e, t), "text": line})
+    out.sort(key=lambda x: x["t"])
+    return out
+
+
+def add_gaps(lines: list[dict], gap_ms: int = GAP_MS) -> list[dict]:
+    """Между строками с известным концом вставляет паузу (♪), если петь не будут хотя бы gap_ms."""
+    out: list[dict] = []
+    for i, ln in enumerate(lines):
+        out.append(ln)
+        nxt = lines[i + 1] if i + 1 < len(lines) else None
+        if ln.get("text") and "e" in ln and nxt and nxt.get("text") and nxt["t"] - ln["e"] >= gap_ms:
+            out.append({"t": ln["e"] + 300, "text": ""})
+    return out
+
+
+def copy_translit_by_text(dst: list[dict], src: list[dict], window_ms: int = 4000, field: str = "hint") -> None:
+    """Поле (подсказка romalrc) из строк LRC в строки yrc: тот же текст, рядом по времени."""
+    by_text: dict[str, list[dict]] = {}
+    for ln in src:
+        if ln.get(field):
+            by_text.setdefault(norm(ln["text"]), []).append(ln)
+    for ln in dst:
+        cands = by_text.get(norm(ln.get("text", "")))
+        if ln.get(field) or not cands:
+            continue
+        best = min(cands, key=lambda c: abs(c["t"] - ln["t"]))
+        if abs(best["t"] - ln["t"]) <= window_ms:
+            ln[field] = best[field]
 
 
 def lyrics_from_lrc(synced_text: str, plain_text: str, source: str) -> dict | None:
@@ -143,24 +201,34 @@ def is_japanese(lyr: dict | None) -> bool:
 
 
 def detect_lang(texts: list[str]) -> str | None:
-    """Язык по тексту: хангыль → ko, кана → ja (даже если часть строк только из кандзи), иероглифы → zh."""
+    """Язык по преобладающей письменности: кана → ja, хангыль → ko, иероглифы → zh (или yue)."""
     joined = "\n".join(texts)
-    if HANGUL.search(joined):
-        return "ko"
-    if KANA.search(joined):
+    if KANA.search(joined) and len(KANA.findall(joined)) >= 0.05 * max(1, len(HANGUL.findall(joined))):
         return "ja"
-    if HAN.search(joined):
-        return "zh"
+    hangul, han = len(HANGUL.findall(joined)), len(HAN.findall(joined))
+    if hangul and hangul >= han:
+        return "ko"
+    if han:
+        return "yue" if is_cantonese(joined) else "zh"
     return None
 
 
 def lyrics_lang(lyr: dict | None) -> str | None:
-    texts = _texts(lyr)
-    if any(HANGUL.search(s) for s in texts):
-        return "ko"
-    if is_japanese(lyr):
+    return detect_lang(_texts(lyr))
+
+
+def is_cantonese(text: str) -> bool:
+    return sum(1 for ch in text if ch in YUE_CHARS) >= 3
+
+
+def han_lang(lyr: dict | None, override: str | None = None) -> str:
+    """Как читать иероглифы трека: ja — если в песне есть кана, иначе yue/zh (ручной выбор важнее)."""
+    joined = "\n".join(_texts(lyr))
+    if KANA.search(joined):
         return "ja"
-    return detect_lang(texts)
+    if override in ("zh", "yue"):
+        return override
+    return "yue" if is_cantonese(joined) else "zh"
 
 
 def is_traditional(text: str) -> bool:
@@ -183,18 +251,34 @@ def is_syllabic(romaji: str) -> bool:
     return short >= 0.85 and avg <= 2.4
 
 
-def script_of(lang: str | None):
-    return {"ja": JP_TEXT, "ko": HANGUL, "zh": HAN, "yue": HAN}.get(lang or "")
-
-
-def needs_translit(ln: dict, lang: str | None) -> bool:
-    """Строка на языке трека без транслитерации — или с транслитерацией по слогам (её лучше переделать).
-    Строки без CJK и хангыля (например, английские) не трогаем."""
-    rx = script_of(lang)
-    if not rx or not ln.get("text") or not rx.search(ln["text"]):
+def needs_translit(ln: dict, lang: str | None = None) -> bool:
+    """Строке с CJK или хангылем нужна транслитерация, если её ещё нет (или она по слогам — старый кэш).
+    Строки без CJK (английские вставки) не трогаем. lang оставлен для совместимости."""
+    if not ln.get("text") or not CJK_ANY.search(ln["text"]):
         return False
     tr = ln.get("translit")
-    return not tr or (lang in ("ja", "ko") and is_syllabic(tr))
+    return not tr or is_syllabic_line(tr)
+
+
+def is_syllabic_line(tr: str) -> bool:
+    """Слоговость считаем только по латинским словам без английских: «Baby love again ya sa shi sa» — по слогам."""
+    words = re.findall(r"[a-zāēīōū]+", (tr or "").lower())
+    words = [w for w in words if w not in _EN_COMMON]
+    return is_syllabic(" ".join(words))
+
+
+_EN_COMMON = set("baby love again oh yeah you me my your i the a and to be is it so no all one more "
+                 "every day night way back go come on hey uh ah oo ooh".split())
+
+
+def strip_inline_translation(lines: list[dict]) -> None:
+    """«人民翻身当家做主人^The people rose up…» — перевод, приклеенный через ^, отрезаем (переведём сами)."""
+    for ln in lines:
+        t = ln.get("text", "")
+        if "^" in t:
+            left, right = t.split("^", 1)
+            if CJK_ANY.search(left) and not CJK_ANY.search(right):
+                ln["text"] = left.strip()
 
 
 def promote_sub_to_translit(lyr: dict) -> None:
@@ -206,14 +290,22 @@ def promote_sub_to_translit(lyr: dict) -> None:
             ln["translit"] = ln.pop("sub")
 
 
+LYRICS_REV = 3  # 3: romalrc NetEase — только подсказка (hint), транслитерацию всегда делают библиотеки
+
+
 def migrate(lyr: dict | None) -> dict | None:
-    """Старый кэш: поле romaji → translit."""
+    """Старый кэш: romaji → translit; ромадзи NetEase (часто по слогам) → hint, чтобы переделали библиотеки."""
     if not lyr:
         return lyr
+    old_rev = lyr.get("rev", 1)
     for ln in lyr.get("lines", []):
         if "romaji" in ln:
             r = ln.pop("romaji")
             ln.setdefault("translit", r)
+        if old_rev < 3 and lyr.get("source") == "netease" and ln.get("translit") \
+                and (KANA.search(ln.get("text", "")) or HANGUL.search(ln.get("text", ""))):
+            ln.setdefault("hint", ln.pop("translit"))
+    lyr["rev"] = LYRICS_REV
     return lyr
 
 
@@ -261,13 +353,27 @@ def pick_lrclib(items: list, dur_ms: int, album: str = "") -> dict | None:
     return good[0][1] if good else None
 
 
+def _scripts_differ(a: list[str], b: list[str]) -> bool:
+    """«Mariya Takeuchi» и «竹内まりや» не сравнить по буквам — тогда хватит совпадения названия."""
+    def latin(names: list[str]) -> bool:
+        return any(re.search(r"[a-z]", n) for n in names) and not any(CJK_ANY.search(n) for n in names)
+    return latin(a) != latin(b)
+
+
+def netease_artist_match(song: dict, artists: list[str]) -> bool:
+    want = [norm(a) for a in artists if norm(a)]
+    names = [norm(a.get("name", "")) for a in (song.get("artists") or song.get("ar") or []) if isinstance(a, dict)]
+    return any(a and (a in b or b in a) for a in names for b in want)
+
+
 def netease_duration(song: dict) -> int:
     return int(song.get("duration") or song.get("dt") or 0)
 
 
-def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int, album: str = "") -> dict | None:
-    """NetEase: длительность ±2 с и совпал артист или название; ближе по длительности лучше,
-    при равенстве — артист, альбом, название."""
+def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int, album: str = "",
+                 title_only: bool = False) -> dict | None:
+    """NetEase: длительность ±2 с и совпал артист (название без артиста — только если имена в разных
+    письменностях); ближе по длительности лучше, при равенстве — артист, альбом, название."""
     want_t = norm(clean_title(title))
     want_a = [norm(a) for a in artists if norm(a)]
     want_album = norm(album)
@@ -283,8 +389,8 @@ def pick_netease(songs: list, title: str, artists: list[str], dur_ms: int, album
         a_ok = any(a and (a in b or b in a) for a in names for b in want_a)
         t = norm(song.get("name", ""))
         t_ok = bool(t and want_t) and (t == want_t or t in want_t or want_t in t)
-        if not (a_ok or t_ok):
-            continue
+        if not a_ok and not (t_ok and (title_only or _scripts_differ(names, want_a))):
+            continue  # тот же трек у другого латинского артиста — почти всегда кавер
         alb = norm(((song.get("album") or song.get("al") or {}) or {}).get("name", ""))
         album_ok = bool(want_album and alb and (alb == want_album or want_album in alb or alb in want_album))
         good.append(((round(diff / 500), not a_ok, not album_ok, not t_ok, diff), song))

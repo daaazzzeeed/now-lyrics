@@ -5,6 +5,7 @@
   var qs = new URLSearchParams(location.search);
   var KEY = qs.get('key') || '';
   var EXTRA_OFFSET = parseInt(qs.get('offset') || '0', 10) || 0;   // ?offset=300 — подстроить на конкретном экране
+  var SHOW_TR = qs.get('tr') !== '0';                               // ?tr=0 — без перевода
   var ANCHOR = 0.3;                                                  // активная строка — на трети высоты карточки
 
   var $ = function (id) { return document.getElementById(id); };
@@ -19,18 +20,40 @@
   };
 
   var S = { status: 'connecting', track: null, lyrics: null, lyrics_state: 'none', offset: 0 };
-  var basePos = 0, baseAt = performance.now(), playing = false;
+  var basePos = 0, baseAt = performance.now(), rate = 1, rateUntil = 0, playing = false;
+  var SNAP_MS = 2500;      // расхождение больше — это перемотка, прыгаем сразу
+  var SLEW_MS = 2500;      // меньшее расхождение выбираем плавно за это время
+  var SLOWEST = 0.6, FASTEST = 1.4;
   var rows = [], synced = false, activeIdx = -2, lastY = -1, lastSec = -1;
   var trackId = null, lyricsKey = null, paletteKey = null;
   var bgFront = el.bgA, coverFront = null;
 
   // ── позиция: сервер присылает раз в несколько секунд, между ними считаем сами ──
-  function curPos() { return playing ? basePos + (performance.now() - baseAt) : basePos; }
+  // Позиция на экране. Spotify присылает progress с дрожанием ±0.5–1.5 с; если просто прыгать
+  // на каждое значение, активная строка дёргается вперёд-назад. Поэтому мелкие расхождения
+  // догоняем, меняя скорость часов (0.6–1.4×): позиция никогда не идёт назад, кроме перемотки.
+  function rebase() {
+    var now = performance.now();
+    if (playing) basePos += (now - baseAt) * rate;
+    baseAt = now;
+  }
+  function curPos() {
+    var now = performance.now();
+    if (!playing) return basePos;
+    if (rate !== 1 && now >= rateUntil) {           // догнали — дальше обычная скорость
+      basePos += (rateUntil - baseAt) * rate; baseAt = rateUntil; rate = 1;
+    }
+    return basePos + (now - baseAt) * rate;
+  }
   function setPos(p, isPlaying) {
-    var predicted = curPos();
-    // мелкие откаты назад — это дрожание отчёта Spotify, а не перемотка: игнорируем
-    if (isPlaying && playing && p < predicted && predicted - p < 450) p = predicted;
-    basePos = p; baseAt = performance.now(); playing = isPlaying;
+    var predicted = curPos(), now = performance.now();
+    if (!isPlaying || !playing || Math.abs(p - predicted) > SNAP_MS) {
+      basePos = p; baseAt = now; rate = 1; playing = isPlaying;   // пауза, старт, перемотка
+      return;
+    }
+    rebase();
+    rate = Math.min(FASTEST, Math.max(SLOWEST, 1 + (p - predicted) / SLEW_MS));
+    rateUntil = now + SLEW_MS;
   }
   function fmt(sec) { sec = Math.max(0, sec); return Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2); }
 
@@ -70,27 +93,30 @@
     back.src = url;
   }
 
-  // ── жирный CJK-шрифт трека: подмножество с сервера, пока грузится — системный шрифт ──
-  var BASE_FONT = getComputedStyle(body).fontFamily, fontUrl = null, fontFace = null;
-  var CJK_RANGE = 'U+3000-30FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FF00-FFEF, U+AC00-D7AF, ' +
-                  'U+1100-11FF, U+3130-318F, U+31F0-31FF';
-  function applyFont(url) {
-    if (url === fontUrl) return;
-    fontUrl = url;
-    if (!url) { body.style.fontFamily = ''; return; }
+  // ── жирный CJK-шрифт трека: подмножества с сервера (для смешанных треков — отдельный корейский),
+  //    пока грузятся — системный шрифт ──
+  var BASE_FONT = getComputedStyle(body).fontFamily, fontKey = null, fontFaces = [];
+  function applyFonts(list) {
+    var key = (list || []).map(function (f) { return f.url; }).join('|');
+    if (key === fontKey) return;
+    fontKey = key;
+    if (!key) { body.style.fontFamily = ''; return; }
     if (!window.FontFace || !document.fonts) return;
-    var fam = 'CJK-' + url.replace(/[^A-Za-z0-9]/g, '').slice(-16);
-    var face = new FontFace(fam, 'url(' + url + '&key=' + encodeURIComponent(KEY) + ')',
-                            { weight: '100 900', unicodeRange: CJK_RANGE, display: 'swap' });
-    face.load().then(function () {
-      if (fontUrl !== url) return;                       // трек уже сменился
-      document.fonts.add(face);
-      if (fontFace) document.fonts.delete(fontFace);
-      fontFace = face;
+    var fam = 'CJK-' + key.replace(/[^A-Za-z0-9]/g, '').slice(-16);
+    var faces = list.map(function (f) {
+      return new FontFace(fam, 'url(' + f.url + '&key=' + encodeURIComponent(KEY) + ')',
+                          { weight: '100 900', unicodeRange: f.range, display: 'swap' });
+    });
+    Promise.all(faces.map(function (f) { return f.load().catch(function () { return null; }); })).then(function (ok) {
+      if (fontKey !== key) return;                        // трек уже сменился
+      fontFaces.forEach(function (f) { document.fonts.delete(f); });
+      fontFaces = ok.filter(Boolean);
+      if (!fontFaces.length) return;                      // нет шрифтов — остаётся системный
+      fontFaces.forEach(function (f) { document.fonts.add(f); });
       body.style.fontFamily = '"' + fam + '", ' + BASE_FONT;
       activeIdx = -2; lastY = -1;                         // высоты строк изменились
       fitTitle();
-    }).catch(function () { /* нет шрифта — остаётся системный */ });
+    });
   }
 
   // ── длинное название: до двух строк, иначе бегущая строка (только transform) ──
@@ -118,21 +144,29 @@
   if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', fitTitle);
 
   // ── текст ──
-  function setSub(d, text) {
-    var r = d.querySelector('.r');
-    if (!text) { if (r) d.removeChild(r); return; }
-    if (!r) { r = document.createElement('div'); r.className = 'r'; d.appendChild(r); }
-    if (r.textContent !== text) r.textContent = text;
+  // под строкой: .r — транслитерация, .tl — перевод (всегда после .r)
+  function setPart(d, cls, text) {
+    var el = d.querySelector('.' + cls);
+    if (!text) { if (el) d.removeChild(el); return; }
+    if (!el) {
+      el = document.createElement('div'); el.className = cls;
+      var tl = cls === 'r' ? d.querySelector('.tl') : null;
+      if (tl) d.insertBefore(el, tl); else d.appendChild(el);
+    }
+    if (el.textContent !== text) el.textContent = text;
   }
+  function subOf(ln) { return ln.translit || ln.romaji || ln.sub || ''; }
+  function tlOf(ln) { return SHOW_TR ? (ln.translation || '') : ''; }
 
-  function patchRomaji() {
+  function patchRomaji() {   // транслитерация и перевод приходят позже текста — дописываем на месте
     var L = S.lyrics, changed = false;
     if (!L || !L.lines) return;
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i], ln = row.idx >= 0 ? L.lines[row.idx] : null;
       if (row.note || !ln) continue;
-      var want = ln.translit || ln.romaji || ln.sub || '';
-      if (want !== row.sub) { setSub(row.el, want); row.sub = want; changed = true; }
+      var sub = subOf(ln), tl = tlOf(ln);
+      if (sub !== row.sub) { setPart(row.el, 'r', sub); row.sub = sub; changed = true; }
+      if (tl !== row.tl) { setPart(row.el, 'tl', tl); row.tl = tl; changed = true; }
     }
     if (changed) { activeIdx = -2; lastY = -1; }   // высота строк изменилась — пересчитать прокрутку
   }
@@ -162,7 +196,7 @@
     if (synced && src[0].ln.t > 2500) src.unshift({ ln: { t: 0, text: '' }, idx: -1 });   // вступление — ♪
     var frag = document.createDocumentFragment();
     src.forEach(function (item) {
-      var ln = item.ln, sub = ln.translit || ln.romaji || ln.sub || '';
+      var ln = item.ln, sub = subOf(ln), tl = tlOf(ln);
       var d = document.createElement('div');
       if (!synced && !ln.text) { d.className = 'gap'; frag.appendChild(d); return; }
       d.className = 'line';
@@ -175,10 +209,11 @@
         o.className = 'o';
         o.textContent = ln.text;
         d.appendChild(o);
-        setSub(d, sub);
+        setPart(d, 'r', sub);
+        setPart(d, 'tl', tl);
       }
       frag.appendChild(d);
-      rows.push({ t: ln.t || 0, el: d, note: note, idx: item.idx, sub: sub });
+      rows.push({ t: ln.t || 0, el: d, note: note, idx: item.idx, sub: sub, tl: tl });
     });
     el.lines.appendChild(frag);
     if (!synced) { el.lines.classList.add('plain'); el.hint.textContent = 'без таймингов'; }
@@ -206,11 +241,19 @@
 
   function updateLines(pos) {
     if (!rows.length) return;
-    if (!synced) {   // текст без таймингов — медленно прокручиваем пропорционально треку
+    if (!synced) {   // текст без таймингов — страницами: страница стоит, пока её можно прочитать
       var dur = S.track ? S.track.duration_ms : 0;
       if (!dur) return;
-      var max = Math.max(0, el.lines.scrollHeight - el.viewport.clientHeight * 0.7);
-      scrollTo(Math.min(1, pos / dur) * max);
+      var pageH = el.viewport.clientHeight * 0.82;
+      var pages = Math.max(1, Math.ceil(el.lines.scrollHeight / pageH));
+      var k = Math.min(1, Math.max(0, (pos / dur - 0.05) / 0.85));   // с 5% до 90% песни
+      var page = Math.min(pages - 1, Math.floor(k * pages));
+      var target = page * pageH, y = 0;
+      for (var i = 0; i < rows.length; i++) {                         // начинаем страницу с целой строки
+        if (rows[i].el.offsetTop > target) break;
+        y = rows[i].el.offsetTop;
+      }
+      scrollTo(page ? y - el.viewport.clientHeight * 0.04 : 0);
       return;
     }
     var idx = findIdx(pos);
@@ -281,7 +324,7 @@
       setCover(tr.cover + (tr.cover.indexOf('?') < 0 ? '?' : '&') + 'key=' + encodeURIComponent(KEY));
       lastSec = -1;
     }
-    applyFont(tr && tr.font ? tr.font : null);
+    applyFonts(tr && tr.fonts ? tr.fonts : null);
     var bare = !!tr && m.lyrics_state === 'none';
     if (bare !== body.classList.contains('bare')) { body.classList.toggle('bare', bare); fitTitle(); }
     renderLyrics();
